@@ -1,6 +1,6 @@
 # Luma RAW · Local-first RAW 照片编辑器
 
-项目名：**Luma RAW**。建议 GitHub 仓库名：`luma-raw-editor`。图标源文件位于 `Art/AppIcon.png`，构建脚本会生成 `AppIcon.icns` 并写入应用包；`.github/workflows/macos.yml` 会在 GitHub Actions 上运行构建检查并上传 macOS 压缩包。完整开发进度见 [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md)。
+项目名：**Luma RAW**。建议 GitHub 仓库名：`luma-raw-editor`。图标源文件位于 `Art/AppIcon.png`，构建脚本会生成 `AppIcon.icns` 并写入应用包；`.github/workflows/macos.yml` 会在 GitHub Actions 上运行构建检查，`.github/workflows/release.yml` 会在推送 `v*` 标签时构建并创建 macOS Release。完整开发进度见 [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md)。
 
 这是已实际编译、启动并验证的 SwiftUI 原生应用，不是界面设计稿。支持 macOS 13+；随附应用为本机编译的 Apple Silicon / arm64 版本，Intel Mac 可从源码重新构建。无第三方运行依赖。
 
