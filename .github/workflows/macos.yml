@@ -1,0 +1,24 @@
+name: macOS build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run checks
+        run: bash scripts/build.sh --check
+      - name: Package application
+        run: ditto -c -k --sequesterRsrc --keepParent "Luma RAW.app" LumaRAW-macos.zip
+      - name: Upload application artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LumaRAW-macos
+          path: |
+            LumaRAW-macos.zip
+            Luma RAW.app

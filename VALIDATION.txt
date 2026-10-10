@@ -1,0 +1,58 @@
+Luma RAW 0.3 · Validation on 2026-10-09
+Environment: macOS 26.5.2, arm64, Apple M1 Max, Swift 6.1
+Full Xcode: not installed; Command Line Tools + macOS SDK used.
+
+Direct swiftc build with local VFS toolchain overlay: PASS
+Native .app packaging and ad-hoc code signature verification: PASS
+Info.plist validation: PASS
+
+VALIDATION backend: Metal · Apple M1 Max
+PASS RAW: synthetic-bayer.dng, decoder 8.dng, 1024×768
+PASS: 49 assertions; recipe/history/orientation/color/metadata/export/source protection
+
+Native app launch, JPEG import, preview, self-window snapshot, clean exit: PASS
+Native app launch, DNG import, preview, self-window snapshot, clean exit: PASS
+
+Standard swift build on this machine: BLOCKED by stale CLT manifest private interface.
+System SwiftBridging module map collision: bypassed with project-local VFS overlay.
+No system toolchain files modified; no dependencies installed.
+
+Not validated: real-camera RAW quality/compatibility, ProRAW, full-size camera RAW
+performance, every native file-panel interaction, Intel or macOS 13 runtime.
+Synthetic DNG validates decoder execution, not photographic correctness.
+
+Folder import update:
+Direct rebuild + original 49 assertions: PASS
+Folder scan: recursive/shallow, hidden/non-photo filtering, natural filename order: PASS
+Duplicate folder import: PASS
+Per-photo adjustments, unsaved indicators, undo/redo across switches: PASS
+Failed import and empty-folder preservation of current edits: PASS
+Native folder import, left photo list and selected preview screenshot: PASS
+GUI test used a temporary bundle identifier because an older user app instance
+was running. That existing instance was not terminated.
+
+Reference color matching and custom crop update:
+Native SwiftUI app and Lab cluster/quantile pipeline compilation: PASS
+Final core runner: 118 assertions PASS (includes original 49).
+Deterministic 1–5 cluster analysis; same-image identity; gray/flat protection: PASS
+Extended linear P3/Lab round trip; malformed match/recipe rejection: PASS
+Independent color/tone strengths; monotonic tone curve; zero-strength bypass: PASS
+GPU versus CPU mean 8-bit RGB error, color + tone: 0.0
+GPU versus CPU mean 8-bit RGB error, tone only: 0.0
+Synthetic reference RGB difference before/after: 38.6833 / 23.7102
+Embedded recipe restoration after reference file deletion: PASS
+Legacy v1 recipe migration; v1-with-match rejected: PASS
+JPEG, 16-bit TIFF, synthetic DNG matching and export consistency: PASS
+Reference import; failed replacement preserves previous engine: PASS
+Apply/clear/undo/redo; strength gestures; non-compounding repeated match: PASS
+Per-photo matching/session/history across folder switches: PASS
+Custom freeform crop dimensions and recipe round-trip: PASS
+Legacy v1 symmetric crop migration: PASS
+Native PNG + reference import, match rendering, snapshot, clean exit: PASS
+Native DNG + reference import, match rendering, snapshot, clean exit: PASS
+UI smoke tests use a temporary distinct bundle identifier and leave old user app running.
+No third-party runtime or network service is used for matching.
+This is an independent implementation inspired by darktable's published algorithm;
+no darktable/G'MIC source is copied, and outputs are not claimed to be identical.
+Not validated: real photographic reference matching quality, semantic/skin preservation,
+or large-camera-RAW interaction performance. Current matching is global statistics only.

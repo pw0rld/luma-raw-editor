@@ -1,0 +1,24 @@
+{
+  "adjustments" : {
+    "cropRect" : {
+      "height" : 0.8,
+      "width" : 0.8,
+      "x" : 0.1,
+      "y" : 0.1
+    },
+    "exposure" : -0.5,
+    "highlights" : 0.75,
+    "horizontalTrim" : 0.09999999999999998,
+    "midtones" : 0.5,
+    "quarterTurns" : 1,
+    "saturation" : 0.5,
+    "shadows" : 0.18,
+    "temperature" : 6500,
+    "tint" : 0,
+    "verticalTrim" : 0.09999999999999998
+  },
+  "pipeline" : "luma-sdr-p3-v2",
+  "sourceName" : "oriented.jpg",
+  "sourceSHA256" : "bffc32adfd8f0f0b1e9ddb50bb13551c6c04ef3667a10c004a2c75144b54c9bf",
+  "version" : 2
+}
