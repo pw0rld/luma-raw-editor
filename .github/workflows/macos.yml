@@ -8,10 +8,21 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    # macos-14 is entering GitHub's deprecation/brownout window.
+    # macos-15 is the current Apple Silicon image used by this project.
+    runs-on: macos-15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+      - name: Show build environment
+        run: |
+          sw_vers
+          uname -m
+          xcrun --find swiftc
+          xcrun swiftc --version
       - name: Build and run checks
+        env:
+          LUMA_BUILD_DIR: ${{ runner.temp }}/luma-build
         run: bash scripts/build.sh --check
       - name: Package application
         run: ditto -c -k --sequesterRsrc --keepParent "Luma RAW.app" LumaRAW-macos.zip
@@ -19,6 +30,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: LumaRAW-macos
-          path: |
-            LumaRAW-macos.zip
-            Luma RAW.app
+          path: LumaRAW-macos.zip
+          if-no-files-found: error
