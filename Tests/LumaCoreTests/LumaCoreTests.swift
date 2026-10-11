@@ -34,6 +34,30 @@ final class LumaCoreTests: XCTestCase {
         for index in 0...150 { let old = state; state.exposure = Double(index); history.record(from: old, to: state) }
         XCTAssertEqual(history.undoStack.count, 100)
     }
+    func testLocalMaskRecipeValidationAndLegacyDefaults() throws {
+        let id = UUID()
+        let mask = LocalMask(id: id, kind: .radial, x: 0.1, y: 0.2, width: 0.6, height: 0.5,
+                             angle: 12, exposure: 1.5, temperatureDelta: 700,
+                             tintDelta: -8, saturation: 0.8, opacity: 0.75,
+                             feather: 0.4, inverted: true, enabled: false)
+        var adjustments = Adjustments(); adjustments.localMasks = [mask]
+        let recipe = Recipe(sourceName: "mask.jpg", sourceSHA256: String(repeating: "c", count: 64),
+                            rawProfile: nil, adjustments: adjustments)
+        let restored = try Recipe.decode(recipe.encoded())
+        XCTAssertEqual(restored.adjustments.localMasks, [mask])
+
+        // A recipe written before local masks existed still decodes to an empty list.
+        let oldJSON = """
+        {"version":2,"pipeline":"luma-sdr-p3-v2","sourceName":"old.jpg",
+         "sourceSHA256":"\(String(repeating: "d", count: 64))","adjustments":{}}
+        """
+        let old = try Recipe.decode(Data(oldJSON.utf8))
+        XCTAssertTrue(old.adjustments.localMasks.isEmpty)
+
+        var invalid = mask; invalid.width = 0.01
+        var bad = adjustments; bad.localMasks = [invalid]
+        XCTAssertThrowsError(try bad.validate())
+    }
     private func fixture(at url: URL) throws {
         let ctx = CGContext(data: nil, width: 80, height: 40, bitsPerComponent: 8, bytesPerRow: 0,
                             space: ImageEngine.outputSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
@@ -111,6 +135,29 @@ final class LumaCoreTests: XCTestCase {
             try recipe.encoded().write(to: samples.appendingPathComponent("orientation-test.luma.json"))
             try await engine.export(edit, profile: nil, to: samples.appendingPathComponent("expected-edited.tiff"), format: .tiff)
         }
+    }
+
+    func testLocalMaskChangesOnlyMaskedRenderAndCanBeDisabled() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let source = directory.appendingPathComponent("mask.jpg")
+        try fixture(at: source)
+        let engine = ImageEngine(), info = try await engine.open(source)
+        let base = try await engine.preview(info.initial, profile: nil, maxDimension: 80)
+        var edit = info.initial
+        edit.localMasks = [LocalMask(kind: .radial, x: 0, y: 0, width: 0.5, height: 1,
+                                     exposure: 1.5, feather: 0.2)]
+        let masked = try await engine.preview(edit, profile: nil, maxDimension: 80)
+        XCTAssertTrue(pixelDifference(base, masked) > 0.5)
+        var disabled = edit; disabled.localMasks[0].enabled = false
+        let disabledImage = try await engine.preview(disabled, profile: nil, maxDimension: 80)
+        XCTAssertLessThan(pixelDifference(base, disabledImage), 0.1)
+        let recipe = Recipe(sourceName: source.lastPathComponent, sourceSHA256: info.sha256,
+                            rawProfile: nil, adjustments: edit)
+        let restored = try Recipe.decode(recipe.encoded())
+        let replay = try await engine.preview(restored.adjustments, profile: nil, maxDimension: 80)
+        XCTAssertLessThan(pixelDifference(masked, replay), 0.1)
     }
     func testRAWFixtureIfProvided() async throws {
         guard let path = ProcessInfo.processInfo.environment["LUMA_RAW_FIXTURE"] else {

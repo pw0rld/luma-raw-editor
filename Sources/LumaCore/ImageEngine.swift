@@ -121,6 +121,91 @@ public actor ImageEngine {
         raw.isGamutMappingEnabled = true
     }
 
+    // Local masks are evaluated on the upright, uncropped image. Keeping this
+    // stage here makes preview, export, and recipe replays use the same geometry.
+    private func localMaskImage(_ mask: LocalMask, extent e: CGRect) -> CIImage {
+        let center = CGPoint(x: e.minX + mask.x * e.width + mask.width * e.width / 2,
+                             y: e.minY + (1 - mask.y - mask.height / 2) * e.height)
+        let bounds = CGRect(x: e.minX + mask.x * e.width,
+                            y: e.minY + (1 - mask.y - mask.height) * e.height,
+                            width: mask.width * e.width,
+                            height: mask.height * e.height)
+        let white = CIColor(red: 1, green: 1, blue: 1, alpha: 1)
+        let black = CIColor(red: 0, green: 0, blue: 0, alpha: 1)
+        let gradient: CIImage
+        switch mask.kind {
+        case .radial:
+            // Build a unit radial gradient and scale it around the center so
+            // non-square mask bounds remain elliptical.
+            // Keep the radii strictly ordered; equal radii are rejected by
+            // some Core Image implementations when feather is zero.
+            let inner = min(0.999, max(0, 1 - mask.feather))
+            let source = CIFilter(name: "CIRadialGradient", parameters: [
+                "inputCenter": CIVector(x: center.x, y: center.y),
+                "inputRadius0": inner,
+                "inputRadius1": 1,
+                "inputColor0": white,
+                "inputColor1": black])?.outputImage ?? CIImage(color: black).cropped(to: e)
+            let rx = max(1, bounds.width / 2), ry = max(1, bounds.height / 2)
+            let transform = CGAffineTransform(translationX: center.x, y: center.y)
+                .scaledBy(x: rx, y: ry)
+                .translatedBy(x: -center.x, y: -center.y)
+            gradient = source.transformed(by: transform).cropped(to: e)
+        case .linear:
+            let radians = mask.angle * .pi / 180
+            // Normalized UI coordinates grow downwards, while Core Image's
+            // y axis grows upwards, hence the sign on dy.
+            let dx = cos(radians), dy = -sin(radians)
+            let length = hypot(e.width, e.height)
+            let start = CGPoint(x: center.x - dx * length, y: center.y - dy * length)
+            let end = CGPoint(x: center.x + dx * length, y: center.y + dy * length)
+            let line = CIFilter(name: "CILinearGradient", parameters: [
+                "inputPoint0": CIVector(cgPoint: start), "inputPoint1": CIVector(cgPoint: end),
+                "inputColor0": white, "inputColor1": black])?.outputImage
+                ?? CIImage(color: black).cropped(to: e)
+            // Restrict a linear gradient to its normalized rectangle; blur the
+            // finite crop so feather also softens the rectangle's outer edge.
+            let blackFrame = CIImage(color: black).cropped(to: e)
+            var lineInside = line.cropped(to: bounds)
+            if mask.feather > 0 {
+                let radius = max(0.5, mask.feather * min(bounds.width, bounds.height) * 0.18)
+                lineInside = lineInside.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
+            }
+            gradient = lineInside.composited(over: blackFrame).cropped(to: e)
+        }
+        var result = gradient
+        if mask.inverted { result = result.applyingFilter("CIColorInvert") }
+        // Keep the mask's alpha in sync with its grayscale value. This makes
+        // both alpha- and luminance-based Core Image mask implementations
+        // behave identically, including inverted and partial-strength masks.
+        let strength = mask.opacity
+        result = result.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: strength, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: strength, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: strength, w: 0),
+            "inputAVector": CIVector(x: 0.299 * strength, y: 0.587 * strength,
+                                      z: 0.114 * strength, w: 0)])
+        return result.cropped(to: e)
+    }
+
+    private func applying(_ mask: LocalMask, to image: CIImage) -> CIImage {
+        var variant = image
+        if mask.temperatureDelta != 0 || mask.tintDelta != 0 {
+            variant = variant.applyingFilter("CITemperatureAndTint", parameters: [
+                "inputNeutral": CIVector(x: 6500, y: 0),
+                "inputTargetNeutral": CIVector(x: 6500 + mask.temperatureDelta, y: mask.tintDelta)])
+        }
+        if mask.exposure != 0 {
+            variant = variant.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: mask.exposure])
+        }
+        if mask.saturation != 1 {
+            variant = variant.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: mask.saturation])
+        }
+        let maskImage = localMaskImage(mask, extent: image.extent)
+        return variant.applyingFilter("CIBlendWithMask", parameters: [
+            kCIInputBackgroundImageKey: image, kCIInputMaskImageKey: maskImage])
+    }
+
     // Preview and export differ only in decoding/output resolution, never in adjustment order.
     private func processed(_ settings: Adjustments, profile: RAWProfile?, maxDimension: CGFloat?) throws -> CIImage {
         try Task.checkCancellation(); try settings.validate()
@@ -155,6 +240,9 @@ public actor ImageEngine {
         if settings.saturation != 1 { image = image.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: settings.saturation]) }
         let orientations: [CGImagePropertyOrientation] = [.up, .right, .down, .left]
         image = image.oriented(orientations[settings.quarterTurns])
+        for mask in settings.localMasks {
+            if mask.enabled { image = applying(mask, to: image) }
+        }
         let e = image.extent
         // CropRect uses top-left normalized coordinates; Core Image uses a bottom-left origin.
         // Integral pixel bounds avoid transparent edge pixels and keep preview/export identical.

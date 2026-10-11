@@ -123,14 +123,21 @@ struct EditorView: View {
                                  subtitle: model.photo?.url.lastPathComponent,
                                  progress: model.rendering || model.busy)
             } else if let image = model.cropPreview ?? model.preview {
-                CropPreviewPane(image: image,
-                                title: model.settings.colorMatch == nil ? "调整后" : "调整后 · 已追色",
-                                subtitle: model.photo?.url.lastPathComponent,
-                                progress: model.rendering || model.busy,
-                                cropRect: model.cropRect,
-                                canEdit: true,
-                                onChange: { model.setCropRect($0) },
-                                onEditingChanged: model.gesture)
+                ZStack {
+                    CropPreviewPane(image: image,
+                                    title: model.settings.colorMatch == nil ? "调整后" : "调整后 · 已追色",
+                                    subtitle: model.photo?.url.lastPathComponent,
+                                    progress: model.rendering || model.busy,
+                                    cropRect: model.cropRect,
+                                    canEdit: true,
+                                    onChange: { model.setCropRect($0) },
+                                    onEditingChanged: model.gesture)
+                    if model.showMaskOverlay, let mask = model.selectedMask {
+                        MaskOverlayPane(image: image, mask: mask,
+                                        onChange: { model.setSelectedMask($0) },
+                                        onEditingChanged: model.gesture)
+                    }
+                }
             } else {
                 Color(white: 0.075)
                 VStack(spacing: 18) {
@@ -178,6 +185,8 @@ struct EditorView: View {
             VStack(alignment: .leading, spacing: 20) {
                 HStack { Text("显影").font(.title3.weight(.semibold)); Spacer(); Button("重置", action: model.reset).font(.caption) }
                 colorMatchControls
+                Divider()
+                masksControls
                 Divider()
                 groupTitle("白平衡", symbol: "thermometer.medium")
                 slider("色温", key: \.temperature, range: 2000...50000, format: "%.0f K")
@@ -243,6 +252,80 @@ struct EditorView: View {
             }
         }
     }
+    private var masksControls: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            maskHeader
+            maskOverlayToggle
+            maskContent
+        }
+    }
+    private var maskOverlayToggle: some View {
+        Toggle("显示画布覆盖", isOn: $model.showMaskOverlay).font(.caption)
+    }
+    private var maskHeader: some View {
+        HStack {
+            groupTitle("蒙版", symbol: "circle.lefthalf.filled")
+            Spacer()
+            Menu {
+                Button { model.addMask(kind: .radial) } label: { Label("径向蒙版", systemImage: "circle.dashed") }
+                Button { model.addMask(kind: .linear) } label: { Label("线性蒙版", systemImage: "line.diagonal") }
+            } label: { Label("新建", systemImage: "plus") }.font(.caption)
+        }
+    }
+    @ViewBuilder private var maskContent: some View {
+        if model.masks.isEmpty {
+            Text("新建径向或线性蒙版，在画布上拖动位置，再调整局部曝光和颜色.")
+                .font(.caption2).foregroundStyle(.secondary)
+        } else {
+            maskList
+            if let mask = model.selectedMask { selectedMaskControls(mask) }
+        }
+    }
+    private var maskList: some View {
+        VStack(spacing: 4) {
+            ForEach(model.masks) { mask in maskRow(mask) }
+        }
+    }
+    private func maskRow(_ mask: LocalMask) -> some View {
+        Button { model.selectMask(mask.id) } label: {
+            HStack(spacing: 8) {
+                Image(systemName: mask.kind == .radial ? "circle.dashed" : "line.diagonal")
+                    .foregroundStyle(mask.enabled ? .orange : .secondary)
+                Text(mask.kind == .radial ? "径向蒙版" : "线性蒙版")
+                Spacer()
+                Text(mask.enabled ? "启用" : "停用")
+                    .foregroundStyle(mask.enabled ? Color.secondary : Color.orange).font(.caption2)
+            }
+            .padding(.horizontal, 8).padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(model.selectedMaskID == mask.id ? Color.orange.opacity(0.18) : Color.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+        }.buttonStyle(.plain)
+    }
+    private func selectedMaskControls(_ mask: LocalMask) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+            HStack {
+                Toggle("启用", isOn: maskBoolBinding(\.enabled)).font(.caption)
+                Spacer()
+                Button("删除", role: .destructive, action: model.removeSelectedMask).font(.caption)
+            }
+            Toggle("反向蒙版", isOn: maskBoolBinding(\.inverted)).font(.caption)
+            maskSlider("局部曝光", key: \.exposure, range: -5...5, format: "%+.2f EV")
+            maskSlider("色温偏移", key: \.temperatureDelta, range: -4000...4000, format: "%+.0f K")
+            maskSlider("色调偏移", key: \.tintDelta, range: -150...150, format: "%+.0f")
+            maskSlider("饱和度", key: \.saturation, range: 0...2, format: "%.2f")
+            maskSlider("强度", key: \.opacity, range: 0...1, format: "%.0f%%", displayScale: 100)
+            maskSlider("羽化", key: \.feather, range: 0...1, format: "%.0f%%", displayScale: 100)
+            maskSlider("角度", key: \.angle, range: -180...180, format: "%+.0f°")
+            Text("拖动画布中的蒙版框调整位置；角度可用滑块旋转。蒙版会保存进配方并支持撤销。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }
+    }
+    private func maskBoolBinding(_ key: WritableKeyPath<LocalMask, Bool>) -> Binding<Bool> {
+        Binding(get: { model.selectedMask?[keyPath: key] ?? false }, set: { value in
+            model.gesture(true); model.setSelectedMask(key, value: value); model.gesture(false)
+        })
+    }
     private func groupTitle(_ title: String, symbol: String) -> some View {
         Label(title, systemImage: symbol).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
     }
@@ -250,6 +333,19 @@ struct EditorView: View {
         VStack(spacing: 6) {
             HStack { Text(title); Spacer(); Text(String(format: format, model.settings[keyPath: key] * displayScale)).monospacedDigit().foregroundStyle(.secondary) }.font(.caption)
             Slider(value: Binding(get: { model.settings[keyPath: key] }, set: { model.set(key, value: $0) }), in: range, onEditingChanged: model.gesture).tint(.orange)
+        }
+    }
+    private func maskSlider(_ title: String, key: WritableKeyPath<LocalMask, Double>, range: ClosedRange<Double>, format: String, displayScale: Double = 1) -> some View {
+        VStack(spacing: 6) {
+            HStack {
+                Text(title); Spacer()
+                Text(String(format: format, (model.selectedMask?[keyPath: key] ?? range.lowerBound) * displayScale)).monospacedDigit().foregroundStyle(.secondary)
+            }.font(.caption)
+            Slider(value: Binding(get: {
+                model.selectedMask?[keyPath: key] ?? range.lowerBound
+            }, set: { value in
+                model.setSelectedMask(key, value: value)
+            }), in: range, onEditingChanged: model.gesture).tint(.orange)
         }
     }
 }
@@ -491,6 +587,173 @@ private struct CropHandle: View {
                     .shadow(color: .black.opacity(0.7), radius: 2)
             }
             .contentShape(Rectangle())
+    }
+}
+
+/// Interactive first-generation local mask overlay. Coordinates match LocalMask's
+/// normalized top-left coordinate system and the crop canvas's fitted image.
+private struct MaskOverlayPane: View {
+    let image: CGImage
+    let mask: LocalMask
+    let onChange: (LocalMask) -> Void
+    let onEditingChanged: (Bool) -> Void
+    @State private var startMask: LocalMask?
+
+    private let inset: CGFloat = 26
+
+    var body: some View {
+        GeometryReader { proxy in
+            let imageRect = fittedImageRect(in: proxy.size)
+            let frame = maskFrame(mask, in: imageRect)
+            ZStack {
+                maskShape(frame: frame, imageRect: imageRect)
+                    .allowsHitTesting(false)
+                Rectangle()
+                    .fill(.clear)
+                    .contentShape(Rectangle())
+                    .frame(width: frame.width, height: frame.height)
+                    .position(x: frame.midX, y: frame.midY)
+                    .gesture(moveGesture(imageRect: imageRect))
+                MaskHandle().position(x: frame.midX, y: frame.midY)
+                    .gesture(moveGesture(imageRect: imageRect))
+                ForEach(MaskCorner.allCases, id: \.self) { corner in
+                    MaskHandle()
+                        .position(handlePosition(corner, frame: frame))
+                        .gesture(resizeGesture(corner, imageRect: imageRect))
+                }
+            }
+        }
+        .padding(inset)
+        .allowsHitTesting(mask.enabled)
+    }
+
+    @ViewBuilder private func maskShape(frame: CGRect, imageRect: CGRect) -> some View {
+        let color = mask.inverted ? Color.purple : Color.orange
+        if mask.kind == .radial {
+            Ellipse()
+                .stroke(color.opacity(0.95), style: StrokeStyle(lineWidth: 2, dash: [7, 4]))
+                .background(Ellipse().fill(color.opacity(0.08)))
+                .frame(width: frame.width, height: frame.height)
+                .position(x: frame.midX, y: frame.midY)
+            Ellipse()
+                .stroke(color.opacity(0.35 + 0.5 * mask.feather), lineWidth: 1)
+                .frame(width: frame.width * 0.66, height: frame.height * 0.66)
+                .position(x: frame.midX, y: frame.midY)
+        } else {
+            RoundedRectangle(cornerRadius: 2)
+                .stroke(color.opacity(0.95), style: StrokeStyle(lineWidth: 2, dash: [7, 4]))
+                .background(RoundedRectangle(cornerRadius: 2).fill(color.opacity(0.06)))
+                .frame(width: frame.width, height: frame.height)
+                .rotationEffect(.degrees(mask.angle))
+                .position(x: frame.midX, y: frame.midY)
+            Path { path in
+                path.move(to: CGPoint(x: frame.minX, y: frame.midY))
+                path.addLine(to: CGPoint(x: frame.maxX, y: frame.midY))
+            }.stroke(color.opacity(0.75), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
+                .rotationEffect(.degrees(mask.angle))
+                .position(x: frame.midX, y: frame.midY)
+        }
+    }
+
+    private func fittedImageRect(in canvas: CGSize) -> CGRect {
+        let available = CGSize(width: max(1, canvas.width), height: max(1, canvas.height))
+        let imageRatio = CGFloat(image.width) / CGFloat(max(1, image.height))
+        let availableRatio = available.width / available.height
+        if imageRatio >= availableRatio {
+            let width = available.width
+            let height = width / imageRatio
+            return CGRect(x: 0, y: (available.height - height) / 2, width: width, height: height)
+        } else {
+            let height = available.height
+            let width = height * imageRatio
+            return CGRect(x: (available.width - width) / 2, y: 0, width: width, height: height)
+        }
+    }
+
+    private func maskFrame(_ mask: LocalMask, in imageRect: CGRect) -> CGRect {
+        CGRect(x: imageRect.minX + imageRect.width * CGFloat(mask.x),
+               y: imageRect.minY + imageRect.height * CGFloat(mask.y),
+               width: imageRect.width * CGFloat(mask.width),
+               height: imageRect.height * CGFloat(mask.height))
+    }
+
+    private enum MaskCorner: CaseIterable, Hashable {
+        case topLeft, topRight, bottomLeft, bottomRight
+    }
+
+    private func handlePosition(_ corner: MaskCorner, frame: CGRect) -> CGPoint {
+        switch corner {
+        case .topLeft: return CGPoint(x: frame.minX, y: frame.minY)
+        case .topRight: return CGPoint(x: frame.maxX, y: frame.minY)
+        case .bottomLeft: return CGPoint(x: frame.minX, y: frame.maxY)
+        case .bottomRight: return CGPoint(x: frame.maxX, y: frame.maxY)
+        }
+    }
+
+    private func moveGesture(imageRect: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if startMask == nil {
+                    startMask = mask
+                    onEditingChanged(true)
+                }
+                guard let startMask else { return }
+                let dx = Double(value.translation.width / max(1, imageRect.width))
+                let dy = Double(value.translation.height / max(1, imageRect.height))
+                var next = startMask
+                next.x = min(max(0, startMask.x + dx), 1 - startMask.width)
+                next.y = min(max(0, startMask.y + dy), 1 - startMask.height)
+                onChange(next)
+            }
+            .onEnded { _ in
+                startMask = nil
+                onEditingChanged(false)
+            }
+    }
+
+    private func resizeGesture(_ corner: MaskCorner, imageRect: CGRect) -> some Gesture {
+        DragGesture(minimumDistance: 0)
+            .onChanged { value in
+                if startMask == nil {
+                    startMask = mask
+                    onEditingChanged(true)
+                }
+                guard let startMask else { return }
+                let dx = Double(value.translation.width / max(1, imageRect.width))
+                let dy = Double(value.translation.height / max(1, imageRect.height))
+                let minimum = 0.02
+                var left = startMask.x, top = startMask.y
+                var right = startMask.x + startMask.width, bottom = startMask.y + startMask.height
+                switch corner {
+                case .topLeft:
+                    left = min(max(0, startMask.x + dx), right - minimum)
+                    top = min(max(0, startMask.y + dy), bottom - minimum)
+                case .topRight:
+                    right = max(min(1, startMask.x + startMask.width + dx), left + minimum)
+                    top = min(max(0, startMask.y + dy), bottom - minimum)
+                case .bottomLeft:
+                    left = min(max(0, startMask.x + dx), right - minimum)
+                    bottom = max(min(1, startMask.y + startMask.height + dy), top + minimum)
+                case .bottomRight:
+                    right = max(min(1, startMask.x + startMask.width + dx), left + minimum)
+                    bottom = max(min(1, startMask.y + startMask.height + dy), top + minimum)
+                }
+                var next = startMask
+                next.x = left; next.y = top; next.width = right - left; next.height = bottom - top
+                onChange(next)
+            }
+            .onEnded { _ in
+                startMask = nil
+                onEditingChanged(false)
+            }
+    }
+}
+
+private struct MaskHandle: View {
+    var body: some View {
+        Circle().fill(Color.white.opacity(0.95)).frame(width: 9, height: 9)
+            .overlay(Circle().stroke(Color.black.opacity(0.7), lineWidth: 1))
+            .shadow(color: .black.opacity(0.7), radius: 2)
     }
 }
 

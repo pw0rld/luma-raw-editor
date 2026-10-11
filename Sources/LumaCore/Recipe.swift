@@ -24,6 +24,82 @@ public struct CropRect: Codable, Equatable {
     }
 }
 
+/// The shape of a first-generation local adjustment mask.
+/// Coordinates are normalized in the displayed upright image and use a top-left origin.
+public enum LocalMaskKind: String, Codable, Equatable {
+    case radial
+    case linear
+}
+
+/// A local adjustment layer. `x`, `y`, `width`, and `height` describe the mask's
+/// normalized bounds. `angle` is in degrees clockwise in the displayed image
+/// (zero points to the right), matching the on-canvas UI.
+public struct LocalMask: Codable, Equatable, Identifiable {
+    public var id: UUID
+    public var kind: LocalMaskKind
+    public var x: Double
+    public var y: Double
+    public var width: Double
+    public var height: Double
+    public var angle: Double
+    public var exposure: Double
+    public var temperatureDelta: Double
+    public var tintDelta: Double
+    public var saturation: Double
+    public var opacity: Double
+    public var feather: Double
+    public var inverted: Bool
+    public var enabled: Bool
+
+    public init(id: UUID = UUID(), kind: LocalMaskKind = .radial,
+                x: Double = 0.25, y: Double = 0.25, width: Double = 0.5, height: Double = 0.5,
+                angle: Double = 0, exposure: Double = 0, temperatureDelta: Double = 0,
+                tintDelta: Double = 0, saturation: Double = 1, opacity: Double = 1,
+                feather: Double = 0.5, inverted: Bool = false, enabled: Bool = true) {
+        self.id = id; self.kind = kind; self.x = x; self.y = y
+        self.width = width; self.height = height; self.angle = angle
+        self.exposure = exposure; self.temperatureDelta = temperatureDelta
+        self.tintDelta = tintDelta; self.saturation = saturation
+        self.opacity = opacity; self.feather = feather; self.inverted = inverted; self.enabled = enabled
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, kind, x, y, width, height, angle, exposure, temperatureDelta
+        case tintDelta, saturation, opacity, feather, inverted, enabled
+    }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
+        kind = try c.decodeIfPresent(LocalMaskKind.self, forKey: .kind) ?? .radial
+        x = try c.decodeIfPresent(Double.self, forKey: .x) ?? 0.25
+        y = try c.decodeIfPresent(Double.self, forKey: .y) ?? 0.25
+        width = try c.decodeIfPresent(Double.self, forKey: .width) ?? 0.5
+        height = try c.decodeIfPresent(Double.self, forKey: .height) ?? 0.5
+        angle = try c.decodeIfPresent(Double.self, forKey: .angle) ?? 0
+        exposure = try c.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
+        temperatureDelta = try c.decodeIfPresent(Double.self, forKey: .temperatureDelta) ?? 0
+        tintDelta = try c.decodeIfPresent(Double.self, forKey: .tintDelta) ?? 0
+        saturation = try c.decodeIfPresent(Double.self, forKey: .saturation) ?? 1
+        opacity = try c.decodeIfPresent(Double.self, forKey: .opacity) ?? 1
+        feather = try c.decodeIfPresent(Double.self, forKey: .feather) ?? 0.5
+        inverted = try c.decodeIfPresent(Bool.self, forKey: .inverted) ?? false
+        enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+    }
+
+    public func validate() throws {
+        let values = [x, y, width, height, angle, exposure, temperatureDelta,
+                      tintDelta, saturation, opacity, feather]
+        guard values.allSatisfy({ $0.isFinite }), x >= 0, y >= 0, width >= 0.02,
+              height >= 0.02, x + width <= 1, y + height <= 1,
+              (-360...360).contains(angle), (-5...5).contains(exposure),
+              (-4000...4000).contains(temperatureDelta), (-150...150).contains(tintDelta),
+              (0...2).contains(saturation), (0...1).contains(opacity),
+              (0...1).contains(feather) else {
+            throw EditorError.message("蒙版包含越界或无效参数。")
+        }
+    }
+}
+
 public struct Adjustments: Codable, Equatable {
     public var temperature = 6500.0
     public var tint = 0.0
@@ -34,6 +110,7 @@ public struct Adjustments: Codable, Equatable {
     public var highlights = 0.75
     public var quarterTurns = 0
     public var cropRect = CropRect()
+    public var localMasks: [LocalMask] = []
     public var colorMatch: ColorMatch?
     public var matchColorStrength: Double {
         get { colorMatch?.colorStrength ?? 0 }
@@ -66,6 +143,7 @@ public struct Adjustments: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case temperature, tint, exposure, saturation, shadows, midtones, highlights, quarterTurns
         case horizontalTrim, verticalTrim, cropRect, colorMatch
+        case localMasks
     }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -82,6 +160,7 @@ public struct Adjustments: Codable, Equatable {
         cropRect = try container.decodeIfPresent(CropRect.self, forKey: .cropRect)
             ?? CropRect(x: oldHorizontal, y: oldVertical,
                         width: 1 - 2 * oldHorizontal, height: 1 - 2 * oldVertical)
+        localMasks = try container.decodeIfPresent([LocalMask].self, forKey: .localMasks) ?? []
         colorMatch = try container.decodeIfPresent(ColorMatch.self, forKey: .colorMatch)
     }
     public func encode(to encoder: Encoder) throws {
@@ -94,6 +173,7 @@ public struct Adjustments: Codable, Equatable {
         try container.encode(horizontalTrim, forKey: .horizontalTrim)
         try container.encode(verticalTrim, forKey: .verticalTrim)
         try container.encode(cropRect, forKey: .cropRect)
+        try container.encode(localMasks, forKey: .localMasks)
         try container.encodeIfPresent(colorMatch, forKey: .colorMatch)
     }
     public func validate() throws {
@@ -104,6 +184,8 @@ public struct Adjustments: Codable, Equatable {
               (0...3).contains(quarterTurns)
         else { throw EditorError.message("配方包含越界或无效参数。") }
         try cropRect.validate()
+        guard localMasks.count <= 64 else { throw EditorError.message("蒙版数量过多。") }
+        for mask in localMasks { try mask.validate() }
         try colorMatch?.validate()
     }
 }

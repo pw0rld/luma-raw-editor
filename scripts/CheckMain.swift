@@ -25,8 +25,10 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
     static func main() async throws {
         let suite = LumaCoreTests()
         try suite.testRecipeRoundTripAndRejection()
+        try suite.testLocalMaskRecipeValidationAndLegacyDefaults()
         suite.testHistoryBranchingAndBound()
         try await suite.testPipelineOrientationMetadataAndOriginalProtection()
+        try await suite.testLocalMaskChangesOnlyMaskedRenderAndCanBeDisabled()
         try await suite.testRAWFixtureIfProvided()
         let match = ColorMatchTests()
         try match.testLabConversionDeterministicAnalysisAndIdentity()
@@ -35,6 +37,6 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
         try await match.testMatchedBitmapPipelineAndEmbeddedRecipe()
         try await match.testMatchedRAWPipelineIfProvided()
         try await match.testCustomCropAndLegacyRecipeMigration()
-        print("PASS: \(assertionCount) assertions; recipe/history/orientation/color/metadata/export/source protection/reference matching")
+        print("PASS: \(assertionCount) assertions; recipe/history/orientation/masks/color/metadata/export/source protection/reference matching")
     }
 }

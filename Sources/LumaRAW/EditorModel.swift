@@ -31,6 +31,8 @@ import LumaCore
     @Published var history = EditHistory()
     @Published var exportFormat: ExportFormat = .jpeg
     @Published var includeGPS = false
+    @Published var selectedMaskID: UUID?
+    @Published var showMaskOverlay = true
     private let engine = ImageEngine()
     private var referenceEngine: ImageEngine?
     private var referencePhoto: PhotoInfo?
@@ -43,6 +45,11 @@ import LumaCore
     var canUndo: Bool { !history.undoStack.isEmpty }
     var canRedo: Bool { !history.redoStack.isEmpty }
     var canMatch: Bool { photo != nil && referencePhoto != nil && !busy }
+    var masks: [LocalMask] { settings.localMasks }
+    var selectedMask: LocalMask? {
+        guard let selectedMaskID else { return nil }
+        return settings.localMasks.first { $0.id == selectedMaskID }
+    }
 
     func confirmDiscard() -> Bool {
         let count = photos.filter { isUnsaved($0) }.count
@@ -167,7 +174,7 @@ import LumaCore
             do {
                 let result = try await engine.open(url)
                 photo = result; settings = result.initial; savedSettings = result.initial
-                history = EditHistory(); compare = false; preview = nil; cropPreview = nil; originalPreview = nil
+                history = EditHistory(); compare = false; selectedMaskID = nil; preview = nil; cropPreview = nil; originalPreview = nil
                 preview = await engine.embeddedThumbnail()
                 originalPreview = try await engine.preview(result.initial, profile: result.profile)
                 if let session = sessions[url], session.sha256 == result.sha256, session.profile == result.profile {
@@ -175,6 +182,7 @@ import LumaCore
                 } else if sessions[url] != nil {
                     self.error = "此原片或 RAW 解码配置已改变，未自动套用旧调整。"
                 }
+                selectedMaskID = settings.localMasks.first?.id
                 preview = settings == result.initial ? originalPreview : try await engine.preview(settings, profile: result.profile)
                 var uncropped = settings; uncropped.cropRect = .full
                 cropPreview = try await engine.preview(uncropped, profile: result.profile)
@@ -239,6 +247,51 @@ import LumaCore
         guard let photo else { return }
         let before = settings; settings = photo.initial; history.record(from: before, to: settings); schedulePreview()
     }
+    func addMask(kind: LocalMaskKind) {
+        guard photo != nil, !busy else { return }
+        let before = settings
+        let mask = LocalMask(kind: kind)
+        settings.localMasks.append(mask)
+        selectedMaskID = mask.id
+        showMaskOverlay = true
+        history.record(from: before, to: settings)
+        status = "已添加\(kind == .radial ? "径向" : "线性")蒙版 · 可拖动调整范围"
+        schedulePreview()
+    }
+    func removeSelectedMask() {
+        guard let selectedMaskID, let index = settings.localMasks.firstIndex(where: { $0.id == selectedMaskID }), !busy else { return }
+        let before = settings
+        settings.localMasks.remove(at: index)
+        self.selectedMaskID = settings.localMasks.indices.contains(max(0, index - 1)) ? settings.localMasks[max(0, index - 1)].id : settings.localMasks.first?.id
+        history.record(from: before, to: settings)
+        status = "已删除蒙版 · 可撤销"
+        schedulePreview()
+    }
+    func selectMask(_ id: UUID) {
+        selectedMaskID = id
+        showMaskOverlay = true
+    }
+    func setSelectedMask(_ key: WritableKeyPath<LocalMask, Double>, value: Double) {
+        guard let selectedMaskID, let index = settings.localMasks.firstIndex(where: { $0.id == selectedMaskID }) else { return }
+        let before = settings
+        settings.localMasks[index][keyPath: key] = value
+        if gestureStart == nil { history.record(from: before, to: settings) }
+        schedulePreview()
+    }
+    func setSelectedMask(_ key: WritableKeyPath<LocalMask, Bool>, value: Bool) {
+        guard let selectedMaskID, let index = settings.localMasks.firstIndex(where: { $0.id == selectedMaskID }) else { return }
+        let before = settings
+        settings.localMasks[index][keyPath: key] = value
+        if gestureStart == nil { history.record(from: before, to: settings) }
+        schedulePreview()
+    }
+    func setSelectedMask(_ value: LocalMask) {
+        guard let index = settings.localMasks.firstIndex(where: { $0.id == value.id }) else { return }
+        let before = settings
+        settings.localMasks[index] = value
+        if gestureStart == nil { history.record(from: before, to: settings) }
+        schedulePreview()
+    }
     func undo() { if let value = history.undo(current: settings) { settings = value; schedulePreview() } }
     func redo() { if let value = history.redo(current: settings) { settings = value; schedulePreview() } }
     private func schedulePreview() {
@@ -281,6 +334,7 @@ import LumaCore
             guard recipe.sourceSHA256 == photo.sha256 else { throw EditorError.message("配方与当前原片不匹配。请先导入配方对应的原片：\(recipe.sourceName)") }
             guard recipe.rawProfile == photo.profile else { throw EditorError.message("此配方的 RAW 默认显影配置与本机不同，不能保证重现。请使用创建配方时的系统版本。") }
             history.record(from: settings, to: recipe.adjustments); settings = recipe.adjustments
+            selectedMaskID = settings.localMasks.first?.id
             savedSettings = settings; schedulePreview(); status = "配方已恢复 · 可撤销"
         } catch { self.error = error.localizedDescription }
     }
