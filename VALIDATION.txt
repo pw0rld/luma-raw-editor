@@ -62,7 +62,7 @@ or large-camera-RAW interaction performance. Current matching is global statisti
 Apple Swift 6.1; direct compiler with local VFS overlay.
 Core, SwiftUI application, packaging and ad-hoc signature verification: PASS.
 81 non-render assertions: PASS.
-StateModelCheck (rotation, undo selection, busy protection, mask limit, draft persistence): PASS.
+StateModelCheck (rotation, undo selection, busy protection, mask limit, draft persistence, unreadable draft preservation): PASS.
 Actual old v0.3 core rejects v3 recipes: PASS; actual old recipe migrates to v3: PASS.
 Release version consistency: PASS; mismatched version rejected: PASS.
 ZIP integrity: PASS.

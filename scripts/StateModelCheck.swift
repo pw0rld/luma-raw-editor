@@ -42,6 +42,16 @@ import LumaCore
         let loaded = try await DraftStore(url: draftURL).load()!
         precondition(loaded.entries[0].recipe.adjustments == model.settings)
         precondition(loaded.entries[0].selectedMaskID == model.selectedMaskID)
+        let brokenURL = directory.appendingPathComponent("broken.json")
+        let brokenData = Data("broken draft".utf8)
+        try brokenData.write(to: brokenURL)
+        let broken = EditorModel(draftURL: brokenURL)
+        await broken.restoreDrafts()
+        precondition(broken.error != nil && !broken.busy)
+        let replacedBrokenDraft = await broken.flushDraft()
+        precondition(!replacedBrokenDraft, "An empty workspace must not overwrite an unreadable draft")
+        let retained = try Data(contentsOf: brokenURL)
+        precondition(retained == brokenData)
 
         if CommandLine.arguments.contains("--render") {
             let restored = EditorModel(draftURL: draftURL)
@@ -56,6 +66,6 @@ import LumaCore
             await restored.waitForPreview()
             precondition(!restored.previewIsFullFrame)
         }
-        print("PASS: mask/crop rotation, undo selection, busy protection, valid mask limit, atomic draft and selection persistence")
+        print("PASS: mask/crop rotation, undo selection, busy protection, valid mask limit, atomic draft, selection persistence and failed draft preservation")
     }
 }

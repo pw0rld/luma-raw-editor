@@ -54,6 +54,7 @@ enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪",
     private var draftTask: Task<Void, Never>?
     private var restoringDraft = false
     private var didRestoreDraft = false
+    private var draftRestoreFailed = false
     init(draftURL: URL? = nil, engine: ImageEngine = ImageEngine()) {
         self.engine = engine; draftStore = draftURL.map { DraftStore(url: $0) }
     }
@@ -93,7 +94,7 @@ enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪",
         }
     }
     @discardableResult func flushDraft() async -> Bool {
-        guard let draftStore, !restoringDraft else { return false }
+        guard let draftStore, !restoringDraft, !(draftRestoreFailed && photos.isEmpty) else { return false }
         do {
             try await draftStore.save(draftSnapshot())
             draftStatus = "草稿已自动保存"; return true
@@ -101,8 +102,8 @@ enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪",
     }
     func restoreDrafts() async {
         guard !didRestoreDraft, let draftStore, photos.isEmpty, photo == nil else { return }
-        didRestoreDraft = true; restoringDraft = true
-        defer { restoringDraft = false }
+        didRestoreDraft = true; restoringDraft = true; busy = true
+        defer { restoringDraft = false; busy = false }
         do {
             guard let snapshot = try await draftStore.load() else { return }
             photos = snapshot.photos
@@ -113,10 +114,10 @@ enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪",
             }
             let existing = photos.filter { FileManager.default.fileExists(atPath: $0.path) }
             let active = snapshot.activeURL.flatMap { existing.contains($0) ? $0 : nil } ?? existing.first
-            if let active { await open(active).value }
+            if let active { busy = false; await open(active).value }
             draftStatus = "已恢复 \(snapshot.entries.count) 张草稿"
             if existing.count < photos.count { draftStatus += " · \(photos.count - existing.count) 张原片未找到" }
-        } catch { self.error = "无法恢复自动草稿：\(error.localizedDescription)" }
+        } catch { draftRestoreFailed = true; self.error = "无法恢复自动草稿：\(error.localizedDescription)" }
     }
     func prepareToQuit() async -> Bool {
         finishGesture(); draftTask?.cancel()
