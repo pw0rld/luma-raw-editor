@@ -131,7 +131,7 @@ final class ColorMatchTests: XCTestCase {
         legacyJSON["adjustments"] = adjustmentsJSON
         let migrated = try Recipe.decode(JSONSerialization.data(withJSONObject: legacyJSON))
         XCTAssertEqual(migrated.version, Recipe.currentVersion)
-        XCTAssertEqual(migrated.pipeline, "luma-sdr-p3-v2")
+        XCTAssertEqual(migrated.pipeline, "luma-sdr-p3-v3")
         XCTAssertEqual(migrated.adjustments, initial)
         legacyJSON["adjustments"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edited))
         XCTAssertThrowsError(try Recipe.decode(JSONSerialization.data(withJSONObject: legacyJSON)))

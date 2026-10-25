@@ -152,13 +152,10 @@ public actor ImageEngine {
                 .translatedBy(x: -center.x, y: -center.y)
             gradient = source.transformed(by: transform).cropped(to: e)
         case .linear:
-            let radians = mask.angle * .pi / 180
-            // Normalized UI coordinates grow downwards, while Core Image's
-            // y axis grows upwards, hence the sign on dy.
-            let dx = cos(radians), dy = -sin(radians)
-            let length = hypot(e.width, e.height)
-            let start = CGPoint(x: center.x - dx * length, y: center.y - dy * length)
-            let end = CGPoint(x: center.x + dx * length, y: center.y + dy * length)
+            let geometry = MaskGeometry(mask, imageSize: e.size)
+            let endpoints = geometry.linearEndpoints
+            let start = CGPoint(x: e.minX + endpoints.start.x, y: e.maxY - endpoints.start.y)
+            let end = CGPoint(x: e.minX + endpoints.end.x, y: e.maxY - endpoints.end.y)
             let line = CIFilter(name: "CILinearGradient", parameters: [
                 "inputPoint0": CIVector(cgPoint: start), "inputPoint1": CIVector(cgPoint: end),
                 "inputColor0": white, "inputColor1": black])?.outputImage
@@ -168,27 +165,26 @@ public actor ImageEngine {
             let blackFrame = CIImage(color: black).cropped(to: e)
             var lineInside = line.cropped(to: bounds)
             if mask.feather > 0 {
-                let radius = max(0.5, mask.feather * min(bounds.width, bounds.height) * 0.18)
+                let radius = geometry.featherRadius
                 lineInside = lineInside.applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: radius])
             }
             gradient = lineInside.composited(over: blackFrame).cropped(to: e)
         }
         var result = gradient
         if mask.inverted { result = result.applyingFilter("CIColorInvert") }
-        // Keep the mask's alpha in sync with its grayscale value. This makes
-        // both alpha- and luminance-based Core Image mask implementations
-        // behave identically, including inverted and partial-strength masks.
+        // CIBlendWithMask reads grayscale. Keep alpha opaque, so premultiplication
+        // cannot apply opacity/feather a second time.
         let strength = mask.opacity
         result = result.applyingFilter("CIColorMatrix", parameters: [
             "inputRVector": CIVector(x: strength, y: 0, z: 0, w: 0),
             "inputGVector": CIVector(x: 0, y: strength, z: 0, w: 0),
             "inputBVector": CIVector(x: 0, y: 0, z: strength, w: 0),
-            "inputAVector": CIVector(x: 0.299 * strength, y: 0.587 * strength,
-                                      z: 0.114 * strength, w: 0)])
+            "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)])
         return result.cropped(to: e)
     }
 
     private func applying(_ mask: LocalMask, to image: CIImage) -> CIImage {
+        if mask.isNeutral { return image }
         var variant = image
         if mask.temperatureDelta != 0 || mask.tintDelta != 0 {
             variant = variant.applyingFilter("CITemperatureAndTint", parameters: [
@@ -215,7 +211,10 @@ public actor ImageEngine {
             guard let profile else { throw EditorError.message("缺少 RAW 显影配置。") }
             let recipe = Recipe(sourceName: info.url.lastPathComponent, sourceSHA256: info.sha256, rawProfile: profile, adjustments: settings)
             try recipe.validate(); try applyProfile(profile, to: raw)
-            raw.scaleFactor = Float(maxDimension.map { min(1, $0 / CGFloat(max(info.width, info.height))) } ?? 1)
+            let upright = settings.quarterTurns % 2 == 0
+                ? CGSize(width: info.width, height: info.height) : CGSize(width: info.height, height: info.width)
+            let cropDimension = max(upright.width * settings.cropRect.width, upright.height * settings.cropRect.height)
+            raw.scaleFactor = Float(maxDimension.map { min(1, $0 / max(1, cropDimension)) } ?? 1)
             raw.isDraftModeEnabled = false
             raw.exposure = Float(settings.exposure)
             raw.neutralTemperature = Float(settings.temperature); raw.neutralTint = Float(settings.tint)
@@ -223,7 +222,6 @@ public actor ImageEngine {
             image = output
         } else if let bitmap {
             image = bitmap
-            if let maxDimension { image = scaled(image, maxDimension: maxDimension) }
             if settings.temperature != 6500 || settings.tint != 0 {
                 image = image.applyingFilter("CITemperatureAndTint", parameters: [
                     "inputNeutral": CIVector(x: 6500, y: 0),
@@ -267,6 +265,22 @@ public actor ImageEngine {
         let image = try processed(settings, profile: profile, maxDimension: maxDimension)
         try Task.checkCancellation()
         guard let result = context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: Self.outputSpace) else { throw EditorError.message("预览渲染失败。") }
+        return result
+    }
+    /// Exact coverage, rendered separately from the photograph for the canvas.
+    public func previewMask(_ mask: LocalMask, width: Int, height: Int) throws -> CGImage {
+        try mask.validate(); try Task.checkCancellation()
+        let extent = CGRect(x: 0, y: 0, width: width, height: height)
+        let coverage = localMaskImage(mask, extent: extent)
+        let overlay = coverage.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 0, w: 0),
+            "inputAVector": CIVector(x: 0.38, y: 0, z: 0, w: 0),
+            "inputBiasVector": CIVector(x: 1, y: 0.25, z: 0.03, w: 0)])
+        guard let result = context.createCGImage(overlay, from: extent, format: .RGBA8, colorSpace: Self.outputSpace) else {
+            throw EditorError.message("蒙版覆盖图渲染失败。")
+        }
         return result
     }
     public func analyzeForMatch(_ settings: Adjustments, profile: RAWProfile?, clusterCount: Int) throws -> MatchAnalysis {
@@ -327,7 +341,7 @@ public actor ImageEngine {
         let originalTIFF = properties[kCGImagePropertyTIFFDictionary as String] as? [String: Any] ?? [:]
         var tiff = originalTIFF.filter { ["Make", "Model", "Artist", "Copyright", "DateTime", "ImageDescription"].contains($0.key) }
         tiff[kCGImagePropertyTIFFOrientation as String] = 1
-        tiff[kCGImagePropertyTIFFSoftware as String] = "Luma RAW 0.3"
+        tiff[kCGImagePropertyTIFFSoftware as String] = "Luma RAW 0.4"
         result[kCGImagePropertyTIFFDictionary as String] = tiff
         if var iptc = properties[kCGImagePropertyIPTCDictionary as String] as? [String: Any] {
             for key in ["Preview", "PreviewFormat", "PreviewVersion", "ImageOrientation"] { iptc.removeValue(forKey: key) }

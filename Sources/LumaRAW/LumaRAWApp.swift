@@ -12,14 +12,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if ProcessInfo.processInfo.environment["LUMA_SMOKE_SNAPSHOT"] != nil { return .terminateNow }
         if model?.busy == true { return .terminateCancel }
-        return model?.confirmDiscard() == false ? .terminateCancel : .terminateNow
+        guard let model else { return .terminateNow }
+        Task { @MainActor in NSApp.reply(toApplicationShouldTerminate: await model.prepareToQuit()) }
+        return .terminateLater
     }
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
 }
 
 @main struct LumaRAWApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
-    @StateObject private var model = EditorModel()
+    @StateObject private var model = EditorModel(draftURL: ProcessInfo.processInfo.environment["LUMA_DRAFT_PATH"]
+        .map { URL(fileURLWithPath: $0) } ?? DraftStore.defaultURL)
     var body: some Scene {
         Window("Luma RAW", id: "editor") {
             EditorView(model: model).onAppear {
@@ -28,6 +31,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     model.addFolder(URL(fileURLWithPath: folder))
                 } else if let path = ProcessInfo.processInfo.environment["LUMA_SMOKE_INPUT"], model.photo == nil {
                     model.open(URL(fileURLWithPath: path))
+                } else {
+                    Task { await model.restoreDrafts() }
                 }
             }
                 .frame(minWidth: 1000, minHeight: 720)
@@ -95,6 +100,9 @@ struct EditorView: View {
                     HStack {
                         Button(action: model.undo) { Image(systemName: "arrow.uturn.backward") }.disabled(!model.canUndo)
                         Button(action: model.redo) { Image(systemName: "arrow.uturn.forward") }.disabled(!model.canRedo)
+                        Picker("编辑工具", selection: $model.tool) {
+                            ForEach(EditorTool.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                        }.pickerStyle(.segmented).frame(width: 180)
                         Spacer()
                         Toggle("查看原片", isOn: $model.compare).toggleStyle(.switch).controlSize(.small).keyboardShortcut("\\", modifiers: [])
                         Spacer()
@@ -108,6 +116,7 @@ struct EditorView: View {
             HStack {
                 Text(model.status).lineLimit(1)
                 Spacer()
+                Text(model.draftStatus).lineLimit(1).help(model.draftStatus)
                 Text("原片只读").foregroundStyle(.orange.opacity(0.8))
             }.font(.system(size: 11)).foregroundStyle(.secondary).padding(.horizontal, 16).padding(.vertical, 9)
         }
@@ -123,21 +132,26 @@ struct EditorView: View {
                                  subtitle: model.photo?.url.lastPathComponent,
                                  progress: model.rendering || model.busy)
             } else if let image = model.cropPreview ?? model.preview {
-                ZStack {
+                if model.tool == .browse || !model.previewIsFullFrame {
+                    PhotoPreviewPane(image: image, title: "调整后 · 成片构图",
+                                     subtitle: model.photo?.url.lastPathComponent, progress: model.rendering || model.busy)
+                } else { ZStack {
                     CropPreviewPane(image: image,
                                     title: model.settings.colorMatch == nil ? "调整后" : "调整后 · 已追色",
                                     subtitle: model.photo?.url.lastPathComponent,
                                     progress: model.rendering || model.busy,
                                     cropRect: model.cropRect,
-                                    canEdit: true,
+                                    canEdit: model.tool == .crop && model.canEditCanvas,
                                     onChange: { model.setCropRect($0) },
                                     onEditingChanged: model.gesture)
-                    if model.showMaskOverlay, let mask = model.selectedMask {
-                        MaskOverlayPane(image: image, mask: mask,
+                        .allowsHitTesting(model.tool == .crop && model.canEditCanvas)
+                    if model.tool == .mask, let mask = model.selectedMask {
+                        MaskOverlayPane(image: image, mask: mask, overlay: model.showMaskOverlay ? model.maskOverlayPreview : nil,
                                         onChange: { model.setSelectedMask($0) },
                                         onEditingChanged: model.gesture)
+                            .id(mask.id)
                     }
-                }
+                }.allowsHitTesting(model.canEditCanvas) }
             } else {
                 Color(white: 0.075)
                 VStack(spacing: 18) {
@@ -204,10 +218,11 @@ struct EditorView: View {
                 slider("亮部", key: \.highlights, range: model.settings.midtones...1, format: "%.2f")
                 Divider()
                 HStack { groupTitle("构图", symbol: "crop.rotate"); Spacer(); Button("旋转 90°", action: model.rotate).font(.caption) }
+                Button(model.tool == .crop ? "完成裁剪" : "编辑裁剪") { model.tool = model.tool == .crop ? .browse : .crop }
                 Button(action: model.resetCrop) {
                     Label("重置裁剪框", systemImage: "arrow.counterclockwise")
                 }.font(.caption)
-                Text("在照片上拖动裁剪框；拖动四角可自由调整比例。查看原片时暂不可编辑。")
+                Text("切换到裁剪工具后拖动边框；四角可自由调整比例。浏览工具显示最终成片。")
                     .font(.caption2).foregroundStyle(.secondary)
                 Divider()
                 groupTitle("导出", symbol: "square.and.arrow.up")
@@ -224,7 +239,10 @@ struct EditorView: View {
                 Label(model.referenceName == nil ? "导入参考图…" : "更换参考图…", systemImage: "photo.on.rectangle")
             }.font(.caption)
             if let referenceName = model.referenceName {
-                Text("参考：\(referenceName)").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                HStack {
+                    Text("参考：\(referenceName)").font(.caption2).foregroundStyle(.secondary).lineLimit(2)
+                    Spacer(); Button("关闭", action: model.clearReference).font(.caption)
+                }
             }
             HStack {
                 Text("颜色分组").font(.caption)
@@ -269,7 +287,7 @@ struct EditorView: View {
             Menu {
                 Button { model.addMask(kind: .radial) } label: { Label("径向蒙版", systemImage: "circle.dashed") }
                 Button { model.addMask(kind: .linear) } label: { Label("线性蒙版", systemImage: "line.diagonal") }
-            } label: { Label("新建", systemImage: "plus") }.font(.caption)
+            } label: { Label("新建", systemImage: "plus") }.font(.caption).disabled(!model.canAddMask)
         }
     }
     @ViewBuilder private var maskContent: some View {
@@ -291,7 +309,7 @@ struct EditorView: View {
             HStack(spacing: 8) {
                 Image(systemName: mask.kind == .radial ? "circle.dashed" : "line.diagonal")
                     .foregroundStyle(mask.enabled ? .orange : .secondary)
-                Text(mask.kind == .radial ? "径向蒙版" : "线性蒙版")
+                Text("\(mask.kind == .radial ? "径向蒙版" : "线性蒙版") \((model.masks.firstIndex(where: { $0.id == mask.id }) ?? 0) + 1)")
                 Spacer()
                 Text(mask.enabled ? "启用" : "停用")
                     .foregroundStyle(mask.enabled ? Color.secondary : Color.orange).font(.caption2)
@@ -316,8 +334,15 @@ struct EditorView: View {
             maskSlider("饱和度", key: \.saturation, range: 0...2, format: "%.2f")
             maskSlider("强度", key: \.opacity, range: 0...1, format: "%.0f%%", displayScale: 100)
             maskSlider("羽化", key: \.feather, range: 0...1, format: "%.0f%%", displayScale: 100)
-            maskSlider("角度", key: \.angle, range: -180...180, format: "%+.0f°")
-            Text("拖动画布中的蒙版框调整位置；角度可用滑块旋转。蒙版会保存进配方并支持撤销。")
+            if mask.kind == .linear {
+                maskSlider("渐变方向", key: \.angle, range: -180...180, format: "%+.0f°")
+                if mask.legacyLinearFalloff {
+                    Button("转换为新版渐变宽度") {
+                        var next = mask; next.legacyLinearFalloff = false; model.setSelectedMask(next)
+                    }.font(.caption)
+                }
+            }
+            Text("拖动框体或四角调整范围。线性渐变以矩形为范围，羽化向外平滑扩展；覆盖色显示实际权重。")
                 .font(.caption2).foregroundStyle(.secondary)
         }
     }
@@ -595,6 +620,7 @@ private struct CropHandle: View {
 private struct MaskOverlayPane: View {
     let image: CGImage
     let mask: LocalMask
+    let overlay: CGImage?
     let onChange: (LocalMask) -> Void
     let onEditingChanged: (Bool) -> Void
     @State private var startMask: LocalMask?
@@ -606,6 +632,11 @@ private struct MaskOverlayPane: View {
             let imageRect = fittedImageRect(in: proxy.size)
             let frame = maskFrame(mask, in: imageRect)
             ZStack {
+                if let overlay {
+                    Image(decorative: overlay, scale: 1).resizable()
+                        .frame(width: imageRect.width, height: imageRect.height)
+                        .position(x: imageRect.midX, y: imageRect.midY).allowsHitTesting(false)
+                }
                 maskShape(frame: frame, imageRect: imageRect)
                     .allowsHitTesting(false)
                 Rectangle()
@@ -623,8 +654,8 @@ private struct MaskOverlayPane: View {
                 }
             }
         }
+        .clipped()
         .padding(inset)
-        .allowsHitTesting(mask.enabled)
     }
 
     @ViewBuilder private func maskShape(frame: CGRect, imageRect: CGRect) -> some View {
@@ -632,26 +663,23 @@ private struct MaskOverlayPane: View {
         if mask.kind == .radial {
             Ellipse()
                 .stroke(color.opacity(0.95), style: StrokeStyle(lineWidth: 2, dash: [7, 4]))
-                .background(Ellipse().fill(color.opacity(0.08)))
                 .frame(width: frame.width, height: frame.height)
                 .position(x: frame.midX, y: frame.midY)
             Ellipse()
-                .stroke(color.opacity(0.35 + 0.5 * mask.feather), lineWidth: 1)
-                .frame(width: frame.width * 0.66, height: frame.height * 0.66)
+                .stroke(color.opacity(0.65), lineWidth: 1)
+                .frame(width: frame.width * (1 - mask.feather), height: frame.height * (1 - mask.feather))
                 .position(x: frame.midX, y: frame.midY)
         } else {
             RoundedRectangle(cornerRadius: 2)
                 .stroke(color.opacity(0.95), style: StrokeStyle(lineWidth: 2, dash: [7, 4]))
-                .background(RoundedRectangle(cornerRadius: 2).fill(color.opacity(0.06)))
                 .frame(width: frame.width, height: frame.height)
-                .rotationEffect(.degrees(mask.angle))
                 .position(x: frame.midX, y: frame.midY)
             Path { path in
-                path.move(to: CGPoint(x: frame.minX, y: frame.midY))
-                path.addLine(to: CGPoint(x: frame.maxX, y: frame.midY))
+                let geometry = MaskGeometry(mask, imageSize: imageRect.size)
+                let points = geometry.linearEndpoints
+                path.move(to: CGPoint(x: imageRect.minX + points.start.x, y: imageRect.minY + points.start.y))
+                path.addLine(to: CGPoint(x: imageRect.minX + points.end.x, y: imageRect.minY + points.end.y))
             }.stroke(color.opacity(0.75), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                .rotationEffect(.degrees(mask.angle))
-                .position(x: frame.midX, y: frame.midY)
         }
     }
 
@@ -751,9 +779,10 @@ private struct MaskOverlayPane: View {
 
 private struct MaskHandle: View {
     var body: some View {
-        Circle().fill(Color.white.opacity(0.95)).frame(width: 9, height: 9)
-            .overlay(Circle().stroke(Color.black.opacity(0.7), lineWidth: 1))
-            .shadow(color: .black.opacity(0.7), radius: 2)
+        Circle().fill(Color.clear).frame(width: 28, height: 28)
+            .overlay(Circle().fill(Color.white).frame(width: 9, height: 9)
+                .overlay(Circle().stroke(Color.black.opacity(0.7), lineWidth: 1)))
+            .contentShape(Rectangle()).shadow(color: .black.opacity(0.7), radius: 2)
     }
 }
 

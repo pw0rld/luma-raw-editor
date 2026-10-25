@@ -24,7 +24,16 @@ jobs:
         env:
           LUMA_BUILD_DIR: ${{ runner.temp }}/luma-build
           LUMA_RAW_FIXTURE: ${{ github.workspace }}/Samples/synthetic-bayer.dng
-        run: bash scripts/build.sh --check
+        run: |
+          set -o pipefail
+          bash scripts/build.sh --check 2>&1 | tee "${{ runner.temp }}/luma-validation.log"
+      - name: Upload validation log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-log
+          path: ${{ runner.temp }}/luma-validation.log
+          if-no-files-found: ignore
       - name: Package application
         run: ditto -c -k --sequesterRsrc --keepParent "Luma RAW.app" LumaRAW-macos.zip
       - name: Upload application artifact

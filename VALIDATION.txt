@@ -56,3 +56,17 @@ This is an independent implementation inspired by darktable's published algorith
 no darktable/G'MIC source is copied, and outputs are not claimed to be identical.
 Not validated: real photographic reference matching quality, semantic/skin preservation,
 or large-camera-RAW interaction performance. Current matching is global statistics only.
+
+
+2026-10-25 — 0.4.0 stability fixes
+Apple Swift 6.1; direct compiler with local VFS overlay.
+Core, SwiftUI application, packaging and ad-hoc signature verification: PASS.
+81 non-render assertions: PASS.
+StateModelCheck (rotation, undo selection, busy protection, mask limit, draft persistence): PASS.
+Actual old v0.3 core rejects v3 recipes: PASS; actual old recipe migrates to v3: PASS.
+Release version consistency: PASS; mismatched version rejected: PASS.
+ZIP integrity: PASS.
+Complete pixel suite: NOT VERIFIED locally. Baseline Core Image createCGImage fails in the current execution environment before mask pixel assertions.
+Native validation helper launch is unavailable here (LaunchServices kLSNoExecutableErr).
+CI --check remains mandatory and includes mask coverage, opacity, feather/inversion, rotation, TIFF/RAW, tight crop analysis and draft reopen tests.
+The --check-model mode explicitly excludes pixel rendering and is not a replacement for --check.

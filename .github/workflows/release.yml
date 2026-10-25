@@ -30,6 +30,13 @@ jobs:
           LUMA_RAW_FIXTURE: ${{ github.workspace }}/Samples/synthetic-bayer.dng
         run: bash scripts/build.sh --check
 
+      - name: Verify release version, architecture and signature
+        run: |
+          python3 scripts/check-release.py "$GITHUB_REF_NAME"
+          test "$(lipo -archs 'Luma RAW.app/Contents/MacOS/LumaRAW')" = "arm64"
+          test "$(lipo -archs 'Luma RAW.app/Contents/Frameworks/libLumaCore.dylib')" = "arm64"
+          codesign --verify --deep --strict "Luma RAW.app"
+
       - name: Package application
         run: |
           asset="LumaRAW-${GITHUB_REF_NAME}-macos-arm64.zip"

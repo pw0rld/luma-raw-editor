@@ -138,7 +138,7 @@ public struct ColorMatch: Codable, Equatable {
               reference.lightnessSamples.allSatisfy({ $0.isFinite && (0...100).contains($0) }) else {
             throw EditorError.message("追色分析的明暗分布无效。")
         }
-        let value = ColorMatch(algorithm: "lab-clusters-quantiles-v1", sourceClusters: source.clusters,
+        let value = ColorMatch(algorithm: "lab-clusters-quantiles-v2", sourceClusters: source.clusters,
                                referenceClusters: reference.clusters, referenceName: referenceName,
                                referenceSHA256: referenceSHA256,
                                toneCurve: makeToneCurve(source.lightnessSamples.sorted(), reference.lightnessSamples.sorted()))
@@ -152,7 +152,7 @@ public struct ColorMatch: Codable, Equatable {
                 (1.5...400).contains($0.stdA) && (1.5...400).contains($0.stdB) && (0.0000001...1).contains($0.weight)
             } && abs(clusters.reduce(0) { $0 + $1.weight } - 1) < 0.00001
         }
-        guard algorithm == "lab-clusters-quantiles-v1", valid(sourceClusters), valid(referenceClusters),
+        guard ["lab-clusters-quantiles-v1", "lab-clusters-quantiles-v2"].contains(algorithm), valid(sourceClusters), valid(referenceClusters),
               !referenceName.isEmpty, referenceName.count <= 1024,
               referenceSHA256.count == 64, referenceSHA256.allSatisfy({ $0.isHexDigit }),
               [colorStrength, luminanceStrength, dominance].allSatisfy({ $0.isFinite && (0...1).contains($0) }),
@@ -163,13 +163,34 @@ public struct ColorMatch: Codable, Equatable {
         }
     }
     public func mappedReferenceClusters() -> [ColorCluster] {
-        sourceClusters.map { source in
-            referenceClusters.min { lhs, rhs in
-                func score(_ ref: ColorCluster) -> Double {
-                    let color = (pow(source.meanA - ref.meanA, 2) + pow(source.meanB - ref.meanB, 2)) / 14400
-                    return (1 - dominance + 0.000001) * color + dominance * pow(source.weight - ref.weight, 2)
+        func score(_ source: ColorCluster, _ ref: ColorCluster) -> Double {
+            let color = (pow(source.meanA - ref.meanA, 2) + pow(source.meanB - ref.meanB, 2)) / 14400
+            return (1 - dominance + 0.000001) * color + dominance * pow(source.weight - ref.weight, 2)
+        }
+        // Preserve existing embedded recipes; only newly analyzed matches use
+        // a global assignment that represents as many reference groups as possible.
+        if algorithm == "lab-clusters-quantiles-v2" {
+            let required = min(sourceClusters.count, referenceClusters.count)
+            var bestCost = Double.infinity, best: [Int] = []
+            func search(_ assignment: [Int], used: Set<Int>, cost: Double) {
+                guard cost < bestCost,
+                      used.count + sourceClusters.count - assignment.count >= required else { return }
+                if assignment.count == sourceClusters.count {
+                    if used.count == required { best = assignment; bestCost = cost }
+                    return
                 }
-                return score(lhs) < score(rhs)
+                for index in referenceClusters.indices {
+                    if sourceClusters.count <= referenceClusters.count && used.contains(index) { continue }
+                    search(assignment + [index], used: used.union([index]),
+                           cost: cost + score(sourceClusters[assignment.count], referenceClusters[index]))
+                }
+            }
+            search([], used: [], cost: 0)
+            return best.map { referenceClusters[$0] }
+        }
+        return sourceClusters.map { source in
+            referenceClusters.min { lhs, rhs in
+                return score(source, lhs) < score(source, rhs)
             }!
         }
     }

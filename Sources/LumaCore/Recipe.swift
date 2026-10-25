@@ -15,6 +15,9 @@ public struct CropRect: Codable, Equatable {
         self.x = x; self.y = y; self.width = width; self.height = height
     }
     public static let full = CropRect()
+    public var rotatedClockwise: CropRect {
+        CropRect(x: max(0, 1 - y - height), y: x, width: height, height: width)
+    }
     public func validate() throws {
         let values = [x, y, width, height]
         guard values.allSatisfy(\.isFinite), x >= 0, y >= 0, width > 0, height > 0,
@@ -35,6 +38,7 @@ public enum LocalMaskKind: String, Codable, Equatable {
 /// normalized bounds. `angle` is in degrees clockwise in the displayed image
 /// (zero points to the right), matching the on-canvas UI.
 public struct LocalMask: Codable, Equatable, Identifiable {
+    public static let maximumCount = 64
     public var id: UUID
     public var kind: LocalMaskKind
     public var x: Double
@@ -50,6 +54,23 @@ public struct LocalMask: Codable, Equatable, Identifiable {
     public var feather: Double
     public var inverted: Bool
     public var enabled: Bool
+    // Preserve the original v2 transition when importing an existing linear mask.
+    public var legacyLinearFalloff = false
+
+    public var isNeutral: Bool {
+        !enabled || opacity == 0 || (exposure == 0 && temperatureDelta == 0 && tintDelta == 0 && saturation == 1)
+    }
+    public var rotatedClockwise: LocalMask {
+        var next = self
+        next.x = max(0, 1 - y - height); next.y = x
+        next.width = height; next.height = width
+        if kind == .linear {
+            next.angle = (angle + 90).truncatingRemainder(dividingBy: 360)
+            if next.angle > 180 { next.angle -= 360 }
+            if next.angle < -180 { next.angle += 360 }
+        }
+        return next
+    }
 
     public init(id: UUID = UUID(), kind: LocalMaskKind = .radial,
                 x: Double = 0.25, y: Double = 0.25, width: Double = 0.5, height: Double = 0.5,
@@ -65,7 +86,7 @@ public struct LocalMask: Codable, Equatable, Identifiable {
 
     private enum CodingKeys: String, CodingKey {
         case id, kind, x, y, width, height, angle, exposure, temperatureDelta
-        case tintDelta, saturation, opacity, feather, inverted, enabled
+        case tintDelta, saturation, opacity, feather, inverted, enabled, legacyLinearFalloff
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -84,6 +105,7 @@ public struct LocalMask: Codable, Equatable, Identifiable {
         feather = try c.decodeIfPresent(Double.self, forKey: .feather) ?? 0.5
         inverted = try c.decodeIfPresent(Bool.self, forKey: .inverted) ?? false
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
+        legacyLinearFalloff = try c.decodeIfPresent(Bool.self, forKey: .legacyLinearFalloff) ?? false
     }
 
     public func validate() throws {
@@ -184,7 +206,10 @@ public struct Adjustments: Codable, Equatable {
               (0...3).contains(quarterTurns)
         else { throw EditorError.message("配方包含越界或无效参数。") }
         try cropRect.validate()
-        guard localMasks.count <= 64 else { throw EditorError.message("蒙版数量过多。") }
+        guard localMasks.count <= LocalMask.maximumCount,
+              Set(localMasks.map(\.id)).count == localMasks.count else {
+            throw EditorError.message("蒙版数量过多或标识重复。")
+        }
         for mask in localMasks { try mask.validate() }
         try colorMatch?.validate()
     }
@@ -200,9 +225,9 @@ public struct RAWProfile: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    public static let currentVersion = 2
-    public var version = 2
-    public var pipeline = "luma-sdr-p3-v2"
+    public static let currentVersion = 3
+    public var version = 3
+    public var pipeline = "luma-sdr-p3-v3"
     public var sourceName: String
     public var sourceSHA256: String
     public var rawProfile: RAWProfile?
@@ -219,12 +244,17 @@ public struct Recipe: Codable, Equatable {
     public static func decode(_ data: Data) throws -> Recipe {
         var value = try JSONDecoder().decode(Recipe.self, from: data)
         if value.version == 1, value.pipeline == "luma-sdr-p3-v1", value.adjustments.colorMatch == nil {
-            value.version = Self.currentVersion; value.pipeline = "luma-sdr-p3-v2"
+            value.version = Self.currentVersion; value.pipeline = "luma-sdr-p3-v3"
+        } else if value.version == 2, value.pipeline == "luma-sdr-p3-v2" {
+            for index in value.adjustments.localMasks.indices where value.adjustments.localMasks[index].kind == .linear {
+                value.adjustments.localMasks[index].legacyLinearFalloff = true
+            }
+            value.version = Self.currentVersion; value.pipeline = "luma-sdr-p3-v3"
         }
         try value.validate(); return value
     }
     public func validate() throws {
-        guard version == Self.currentVersion, pipeline == "luma-sdr-p3-v2" else {
+        guard version == Self.currentVersion, pipeline == "luma-sdr-p3-v3" else {
             throw EditorError.message("不支持此配方版本或处理管线。")
         }
         guard sourceSHA256.count == 64, sourceSHA256.allSatisfy({ $0.isHexDigit }) else {
@@ -247,7 +277,7 @@ public struct Recipe: Codable, Equatable {
     }
 }
 
-public struct EditHistory {
+public struct EditHistory: Codable {
     public private(set) var undoStack: [Adjustments] = []
     public private(set) var redoStack: [Adjustments] = []
     public init() {}

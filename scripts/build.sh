@@ -30,7 +30,9 @@ for spec in \
     size="${spec%% *}"; name="${spec#* }"
     sips -z "$size" "$size" "$ROOT/Art/AppIcon.png" --out "$ICONSET/$name" >/dev/null
 done
-iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"
+if ! iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/AppIcon.icns"; then
+    python3 "$ROOT/scripts/make-icon.py" "$ICONSET" "$APP/Contents/Resources/AppIcon.icns"
+fi
 # Replace files by rename so a running older instance retains its mapped inodes.
 cp "$BUILD/LumaRAW" "$APP/Contents/MacOS/LumaRAW.new"
 mv -f "$APP/Contents/MacOS/LumaRAW.new" "$APP/Contents/MacOS/LumaRAW"
@@ -40,11 +42,23 @@ cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 codesign --force --sign - "$APP/Contents/Frameworks/libLumaCore.dylib"
 codesign --force --sign - "$APP"
 printf 'Built: %s\n' "$APP"
-if [[ "${1:-}" == "--check" ]]; then
+if [[ "${1:-}" == "--check" || "${1:-}" == "--check-model" ]]; then
     xcrun swiftc "${FLAGS[@]}" -parse-as-library -D STANDALONE_CHECK -I "$BUILD" -L "$BUILD" -lLumaCore \
         "$ROOT"/Tests/LumaCoreTests/*.swift "$ROOT/scripts/CheckMain.swift" \
         -o "$BUILD/LumaCheck" -Xlinker -rpath -Xlinker @executable_path
-    "$BUILD/LumaCheck"
+    if [[ "$1" == "--check-model" ]]; then
+        "$BUILD/LumaCheck" --non-render
+    else
+        "$BUILD/LumaCheck"
+    fi
+    xcrun swiftc "${FLAGS[@]}" -parse-as-library -I "$BUILD" -L "$BUILD" -lLumaCore \
+        "$ROOT/Sources/LumaRAW/EditorModel.swift" "$ROOT/scripts/StateModelCheck.swift" \
+        -o "$BUILD/StateModelCheck" -Xlinker -rpath -Xlinker @executable_path
+    if [[ "$1" == "--check-model" ]]; then
+        "$BUILD/StateModelCheck" "$ROOT/Samples"
+        exit 0
+    fi
+    "$BUILD/StateModelCheck" "$ROOT/Samples" --render
     xcrun swiftc "${FLAGS[@]}" -parse-as-library -I "$BUILD" -L "$BUILD" -lLumaCore \
         "$ROOT/Sources/LumaRAW/EditorModel.swift" "$ROOT/scripts/FolderCheck.swift" \
         -o "$BUILD/FolderCheck" -Xlinker -rpath -Xlinker @executable_path
