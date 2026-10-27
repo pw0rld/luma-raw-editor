@@ -59,6 +59,10 @@ if [[ "${1:-}" == "--check" || "${1:-}" == "--check-model" ]]; then
         exit 0
     fi
     "$BUILD/StateModelCheck" "$ROOT/Samples" --render
+    xcrun swiftc "${FLAGS[@]}" -parse-as-library \
+        "$ROOT/Sources/LumaRAW/CanvasNavigation.swift" "$ROOT/scripts/CanvasNavigationCheck.swift" \
+        -o "$BUILD/CanvasNavigationCheck"
+    "$BUILD/CanvasNavigationCheck"
     xcrun swiftc "${FLAGS[@]}" -parse-as-library -I "$BUILD" -L "$BUILD" -lLumaCore \
         "$ROOT/Sources/LumaRAW/EditorModel.swift" "$ROOT/scripts/FolderCheck.swift" \
         -o "$BUILD/FolderCheck" -Xlinker -rpath -Xlinker @executable_path

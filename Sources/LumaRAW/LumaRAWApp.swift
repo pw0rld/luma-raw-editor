@@ -106,7 +106,7 @@ struct EditorView: View {
                         Spacer()
                         Toggle("查看原片", isOn: $model.compare).toggleStyle(.switch).controlSize(.small).keyboardShortcut("\\", modifiers: [])
                         Spacer()
-                        Text("适合窗口 · SDR").font(.caption).foregroundStyle(.secondary)
+                        Text("SDR").font(.caption).foregroundStyle(.secondary)
                     }.padding(14).disabled(model.photo == nil || model.busy)
                 }
                 Divider()
@@ -127,31 +127,8 @@ struct EditorView: View {
     }
     private var targetCanvas: some View {
         ZStack {
-            if model.compare, let image = model.originalPreview {
-                PhotoPreviewPane(image: image, title: "原片显影",
-                                 subtitle: model.photo?.url.lastPathComponent,
-                                 progress: model.rendering || model.busy)
-            } else if let image = model.cropPreview ?? model.preview {
-                if model.tool == .browse || !model.previewIsFullFrame {
-                    PhotoPreviewPane(image: image, title: "调整后 · 成片构图",
-                                     subtitle: model.photo?.url.lastPathComponent, progress: model.rendering || model.busy)
-                } else { ZStack {
-                    CropPreviewPane(image: image,
-                                    title: model.settings.colorMatch == nil ? "调整后" : "调整后 · 已追色",
-                                    subtitle: model.photo?.url.lastPathComponent,
-                                    progress: model.rendering || model.busy,
-                                    cropRect: model.cropRect,
-                                    canEdit: model.tool == .crop && model.canEditCanvas,
-                                    onChange: { model.setCropRect($0) },
-                                    onEditingChanged: model.gesture)
-                        .allowsHitTesting(model.tool == .crop && model.canEditCanvas)
-                    if model.tool == .mask, let mask = model.selectedMask {
-                        MaskOverlayPane(image: image, mask: mask, overlay: model.showMaskOverlay ? model.maskOverlayPreview : nil,
-                                        onChange: { model.setSelectedMask($0) },
-                                        onEditingChanged: model.gesture)
-                            .id(mask.id)
-                    }
-                }.allowsHitTesting(model.canEditCanvas) }
+            if let image = model.compare ? model.originalPreview : (model.cropPreview ?? model.preview) {
+                NavigablePhotoCanvas(model: model, image: image)
             } else {
                 Color(white: 0.075)
                 VStack(spacing: 18) {
@@ -380,149 +357,243 @@ struct PhotoPreviewPane: View {
     let subtitle: String?
     var progress = false
     var body: some View {
-        ZStack {
-            Color(white: 0.075)
-            GeometryReader { proxy in
-                Image(decorative: image, scale: 1).resizable().aspectRatio(contentMode: .fit)
-                    .frame(width: proxy.size.width, height: proxy.size.height)
-            }.padding(26)
-            VStack {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
                 HStack {
-                    Text(title).font(.caption.weight(.medium)).padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(.black.opacity(0.55), in: Capsule())
-                    Spacer()
-                    if progress { ProgressView().controlSize(.small).padding(8) }
+                    Text(title).font(.caption.weight(.medium)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if progress { ProgressView().controlSize(.small) }
                 }
-                Spacer()
-                if let subtitle {
-                    Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                        .padding(.horizontal, 10).padding(.vertical, 4).background(.black.opacity(0.5), in: Capsule())
-                }
-            }.padding(14)
-        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+                HStack { Text("适合窗口"); Spacer(minLength: 0) }
+                    .font(.caption).foregroundStyle(.secondary)
+            }.padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 6)
+            GeometryReader { proxy in
+                let transform = ViewportTransform(imageSize: CGSize(width: image.width, height: image.height), viewportSize: proxy.size)
+                Image(decorative: image, scale: 1).resizable()
+                    .frame(width: transform.imageRect.width, height: transform.imageRect.height)
+                    .position(x: transform.imageRect.midX, y: transform.imageRect.midY)
+            }.padding(16)
+            Text(subtitle ?? "参考图").font(.caption2).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle).padding(.bottom, 10)
+        }.background(Color(white: 0.075)).frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
-/// Image canvas with a normalized, free-form crop box. The model owns the
-/// normalized rectangle; this view only translates pointer movement into it.
-private struct CropPreviewPane: View {
+private struct CanvasDetailRequest: Equatable {
+    let source: CanvasRenderState
+    let plan: DetailPlan
+    let backing: CGFloat
+    let pixelScale: CGFloat
+    let loadTiles: Bool
+}
+
+/// Full-resolution geometry drives both the low-resolution base and native tiles.
+private struct NavigablePhotoCanvas: View {
+    @ObservedObject var model: EditorModel
     let image: CGImage
-    let title: String
-    let subtitle: String?
-    let progress: Bool
+    @Environment(\.displayScale) private var environmentDisplayScale
+    @State private var nativeDisplayScale: CGFloat?
+    @State private var viewport = ViewportState()
+    @State private var canvasSize = CGSize(width: 1, height: 1)
+    @State private var detailSource: CanvasRenderState?
+    @State private var tiles: [DetailTile] = []
+    @State private var activeRequest: CanvasDetailRequest?
+    @State private var detailError: String?
+    private var displayScale: CGFloat { nativeDisplayScale ?? environmentDisplayScale }
+
+    private var imageSize: CGSize { model.canvasImageSize ?? CGSize(width: image.width, height: image.height) }
+    private var transform: ViewportTransform {
+        ViewportTransform(imageSize: imageSize, viewportSize: canvasSize, state: viewport, displayScale: displayScale)
+    }
+    private var detailRequest: CanvasDetailRequest? {
+        guard canvasSize.width > 1, canvasSize.height > 1, let source = model.canvasRenderState,
+              let plan = try? DetailPlan(transform: transform) else { return nil }
+        return CanvasDetailRequest(source: source, plan: plan, backing: displayScale, pixelScale: transform.pixelScale,
+            loadTiles: DetailPlan.needsTiles(transform: transform, previewSize: CGSize(width: image.width, height: image.height)))
+    }
+    private var planningError: String? {
+        guard model.canvasRenderState != nil, canvasSize.width > 1, canvasSize.height > 1 else { return nil }
+        do { _ = try DetailPlan(transform: transform); return nil }
+        catch { return error.localizedDescription }
+    }
+    private var geometryKey: String {
+        "\(model.photo?.url.absoluteString ?? "")|\(imageSize.width)x\(imageSize.height)|\(model.tool)|\(model.compare)|\(model.previewIsFullFrame)|\(model.previewQuarterTurns)"
+    }
+    private var title: String {
+        if model.compare { return "原片显影" }
+        return model.tool == .browse ? "调整后 · 成片构图" : "调整后 · 全图编辑"
+    }
+    private var detailStatus: String {
+        if let message = detailError ?? planningError { return message }
+        guard let request = detailRequest, request.source == detailSource else { return "预览中" }
+        if !request.loadTiles { return "清晰预览" }
+        let ready = tiles.filter { request.plan.tiles.contains($0.id) }.count
+        if ready < request.plan.tiles.count { return "细节 \(ready)/\(request.plan.tiles.count)" }
+        return request.plan.tiles.first?.divisor == 1 ? "原始细节" : "清晰预览"
+    }
+    var body: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(title).font(.caption.weight(.medium)).lineLimit(1)
+                    Spacer(minLength: 0)
+                    if model.rendering || model.busy { ProgressView().controlSize(.small) }
+                }
+                HStack(spacing: 8) {
+                    Button("适合窗口") { viewport.fit() }.disabled(viewport.pixelScale == nil)
+                    Button("100%") { setScale(1) }.help("一个照片像素对应一个屏幕物理像素")
+                    Spacer(minLength: 0)
+                    Button { zoom(by: 1 / 1.5) } label: { Image(systemName: "minus.magnifyingglass") }
+                        .disabled(transform.pixelScale <= ViewportState.minimumPixelScale).help("缩小")
+                    Menu {
+                        Button("50%") { setScale(0.5) }
+                        Button("100%") { setScale(1) }
+                        Button("200%") { setScale(2) }
+                    } label: {
+                        Text(String(format: "%.0f%%", Double(transform.pixelScale * 100))).monospacedDigit().fixedSize()
+                    }.menuStyle(.borderlessButton).fixedSize()
+                    Button { zoom(by: 1.5) } label: { Image(systemName: "plus.magnifyingglass") }
+                        .disabled(transform.pixelScale >= ViewportState.maximumPixelScale).help("放大")
+                }.font(.caption).disabled(model.busy)
+            }.padding(.horizontal, 14).padding(.top, 12).padding(.bottom, 6)
+            GeometryReader { proxy in
+                let geometry = ViewportTransform(imageSize: imageSize, viewportSize: proxy.size, state: viewport, displayScale: displayScale)
+                ZStack(alignment: .topLeading) {
+                    Image(decorative: image, scale: 1).resizable()
+                        .frame(width: geometry.imageRect.width, height: geometry.imageRect.height)
+                        .position(x: geometry.imageRect.midX, y: geometry.imageRect.midY).allowsHitTesting(false)
+                    detailLayer(geometry)
+                    if !model.compare, model.tool != .browse, model.previewIsFullFrame {
+                        CropOverlayPane(transform: geometry, cropRect: model.cropRect,
+                                        canEdit: model.tool == .crop && model.canEditCanvas,
+                                        onChange: model.setCropRect, onEditingChanged: model.gesture)
+                            .allowsHitTesting(model.tool == .crop && model.canEditCanvas)
+                        if model.tool == .mask, let mask = model.selectedMask {
+                            MaskOverlayPane(transform: geometry, mask: mask,
+                                            overlay: model.showMaskOverlay ? model.maskOverlayPreview : nil,
+                                            onChange: { model.setSelectedMask($0) }, onEditingChanged: model.gesture)
+                                .id(mask.id).allowsHitTesting(model.canEditCanvas)
+                        }
+                    }
+                }
+                .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading).clipped()
+                .background(CanvasNavigation(enabled: !model.busy,
+                    dragToPan: model.compare || model.tool == .browse || !model.previewIsFullFrame,
+                    onZoom: { factor, point in
+                        viewport.zoom(by: factor, at: point, imageSize: imageSize, viewportSize: proxy.size, displayScale: displayScale)
+                    }, onPan: { delta in
+                        viewport.pan(by: delta, imageSize: imageSize, viewportSize: proxy.size, displayScale: displayScale)
+                    }, onDoubleClick: { point in
+                        if viewport.pixelScale == 1 { viewport.fit() }
+                        else { viewport.setPixelScale(1, at: point, imageSize: imageSize, viewportSize: proxy.size, displayScale: displayScale) }
+                    }, onDisplayScale: { nativeDisplayScale = $0 }))
+                .onAppear { canvasSize = proxy.size; applySmokeScale() }
+                .onChange(of: proxy.size) { canvasSize = $0 }
+            }.padding(16)
+            HStack {
+                Text(model.tool == .browse || model.compare ? "拖动平移 · 捏合缩放" : "空格拖动平移")
+                Spacer(minLength: 2)
+                Text(detailStatus).foregroundStyle(detailError == nil && planningError == nil ? Color.secondary : Color.orange)
+            }.font(.caption2).foregroundStyle(.secondary).lineLimit(1).padding(.horizontal, 14).padding(.bottom, 10)
+                .help(detailError ?? planningError ?? "浏览模式双击或触控板双指轻点：100%/适合窗口；⌘＋滚轮缩放，普通滚动平移")
+        }
+        .background(Color(white: 0.075)).frame(maxWidth: .infinity, maxHeight: .infinity)
+        .onChange(of: geometryKey) { _ in viewport.fit(); applySmokeScale() }
+        .task(id: detailRequest) { await loadDetails(detailRequest) }
+    }
+    @ViewBuilder private func detailLayer(_ geometry: ViewportTransform) -> some View {
+        if let request = detailRequest, request.loadTiles, detailSource == request.source {
+            ZStack(alignment: .topLeading) {
+                ForEach(tiles.filter { request.plan.tiles.contains($0.id) }, id: \.id) { tile in
+                    let rect = geometry.viewRect(for: CGRect(x: tile.sourceRect.minX / imageSize.width,
+                        y: tile.sourceRect.minY / imageSize.height, width: tile.sourceRect.width / imageSize.width, height: tile.sourceRect.height / imageSize.height))
+                    Image(decorative: tile.image, scale: 1).resizable()
+                        .interpolation(geometry.pixelScale >= 1 ? .none : .high)
+                        .frame(width: rect.width, height: rect.height).position(x: rect.midX, y: rect.midY)
+                }
+            }.frame(width: geometry.viewportSize.width, height: geometry.viewportSize.height, alignment: .topLeading)
+                .mask(Rectangle().frame(width: geometry.imageRect.width, height: geometry.imageRect.height)
+                    .position(x: geometry.imageRect.midX, y: geometry.imageRect.midY))
+                .allowsHitTesting(false)
+        }
+    }
+    private func loadDetails(_ request: CanvasDetailRequest?) async {
+        activeRequest = request; detailError = nil
+        guard let request else { tiles = []; detailSource = nil; return }
+        if detailSource != request.source { tiles = []; detailSource = request.source }
+        if !request.loadTiles { tiles = []; return }
+        tiles = tiles.filter { request.plan.tiles.contains($0.id) }
+        do {
+            try await Task.sleep(nanoseconds: 120_000_000)
+            for id in request.plan.tiles where !tiles.contains(where: { $0.id == id }) {
+                try Task.checkCancellation()
+                let tile = try await model.renderDetail(id, source: request.source)
+                try Task.checkCancellation()
+                guard activeRequest == request else { return }
+                tiles.append(tile)
+            }
+            if nativeDisplayScale != nil {
+                model.recordDetailSmoke(source: request.source, pixelScale: transform.pixelScale,
+                                        backing: displayScale, tiles: request.plan.tiles.count)
+            }
+        } catch is CancellationError { }
+        catch { if activeRequest == request { detailError = error.localizedDescription } }
+    }
+    private func zoom(by factor: CGFloat) {
+        viewport.zoom(by: factor, at: CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2),
+                      imageSize: imageSize, viewportSize: canvasSize, displayScale: displayScale)
+    }
+    private func setScale(_ scale: CGFloat) {
+        viewport.setPixelScale(scale, at: CGPoint(x: canvasSize.width / 2, y: canvasSize.height / 2),
+                               imageSize: imageSize, viewportSize: canvasSize, displayScale: displayScale)
+    }
+    private func applySmokeScale() {
+        if let value = ProcessInfo.processInfo.environment["LUMA_SMOKE_DETAIL_SCALE"], let scale = Double(value), scale > 0 {
+            setScale(CGFloat(scale))
+        }
+    }
+}
+
+/// Overlay dimensions and input use the same transform as the photograph.
+private struct CropOverlayPane: View {
+    let transform: ViewportTransform
     let cropRect: CropRect
     let canEdit: Bool
     let onChange: (CropRect) -> Void
     let onEditingChanged: (Bool) -> Void
-
     @State private var gestureStart: CropRect?
-    @State private var interaction: CropInteraction?
-
-    private let inset: CGFloat = 26
     private let minimumCropFraction = 0.02
-
-    private enum Corner: Hashable {
-        case topLeft, topRight, bottomLeft, bottomRight
-    }
-
-    private enum CropInteraction {
-        case move
-        case resize(Corner)
-    }
+    private enum Corner: Hashable { case topLeft, topRight, bottomLeft, bottomRight }
 
     var body: some View {
-        ZStack {
-            Color(white: 0.075)
-            GeometryReader { proxy in
-                let imageRect = fittedImageRect(in: proxy.size)
-                let visibleCrop = cropFrame(for: cropRect, in: imageRect)
-
-                Image(decorative: image, scale: 1)
-                    .resizable()
-                    .frame(width: imageRect.width, height: imageRect.height)
-                    .position(x: imageRect.midX, y: imageRect.midY)
-
-                CropShade(cropFrame: visibleCrop, canvas: proxy.size)
-
-                Path { path in
-                    path.move(to: CGPoint(x: visibleCrop.minX + visibleCrop.width / 3, y: visibleCrop.minY))
-                    path.addLine(to: CGPoint(x: visibleCrop.minX + visibleCrop.width / 3, y: visibleCrop.maxY))
-                    path.move(to: CGPoint(x: visibleCrop.minX + visibleCrop.width * 2 / 3, y: visibleCrop.minY))
-                    path.addLine(to: CGPoint(x: visibleCrop.minX + visibleCrop.width * 2 / 3, y: visibleCrop.maxY))
-                    path.move(to: CGPoint(x: visibleCrop.minX, y: visibleCrop.minY + visibleCrop.height / 3))
-                    path.addLine(to: CGPoint(x: visibleCrop.maxX, y: visibleCrop.minY + visibleCrop.height / 3))
-                    path.move(to: CGPoint(x: visibleCrop.minX, y: visibleCrop.minY + visibleCrop.height * 2 / 3))
-                    path.addLine(to: CGPoint(x: visibleCrop.maxX, y: visibleCrop.minY + visibleCrop.height * 2 / 3))
+        let imageRect = transform.imageRect
+        let visibleCrop = transform.viewRect(for: CGRect(x: cropRect.x, y: cropRect.y, width: cropRect.width, height: cropRect.height))
+        ZStack(alignment: .topLeading) {
+            CropShade(cropFrame: visibleCrop, canvas: transform.viewportSize).allowsHitTesting(false)
+            Path { path in
+                for fraction in [1.0 / 3, 2.0 / 3] {
+                    let x = visibleCrop.minX + visibleCrop.width * fraction
+                    let y = visibleCrop.minY + visibleCrop.height * fraction
+                    path.move(to: CGPoint(x: x, y: visibleCrop.minY))
+                    path.addLine(to: CGPoint(x: x, y: visibleCrop.maxY))
+                    path.move(to: CGPoint(x: visibleCrop.minX, y: y))
+                    path.addLine(to: CGPoint(x: visibleCrop.maxX, y: y))
                 }
-                .stroke(Color.white.opacity(canEdit ? 0.38 : 0.15), lineWidth: 1)
-
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .frame(width: visibleCrop.width, height: visibleCrop.height)
-                    .position(x: visibleCrop.midX, y: visibleCrop.midY)
-                    .gesture(moveGesture(imageRect: imageRect))
-
-                RoundedRectangle(cornerRadius: 1)
-                    .stroke(canEdit ? Color.white : Color.white.opacity(0.35), lineWidth: 2)
-                    .frame(width: visibleCrop.width, height: visibleCrop.height)
-                    .position(x: visibleCrop.midX, y: visibleCrop.midY)
-
-                if canEdit {
-                    ForEach([Corner.topLeft, .topRight, .bottomLeft, .bottomRight], id: \.self) { corner in
-                        CropHandle()
-                            .position(handlePosition(corner, frame: visibleCrop))
-                            .gesture(resizeGesture(corner, imageRect: imageRect))
-                    }
+            }.stroke(Color.white.opacity(canEdit ? 0.38 : 0.15), lineWidth: 1).allowsHitTesting(false)
+            Rectangle().fill(.clear).contentShape(Rectangle())
+                .frame(width: visibleCrop.width, height: visibleCrop.height)
+                .position(x: visibleCrop.midX, y: visibleCrop.midY)
+                .gesture(moveGesture(imageRect: imageRect))
+            Rectangle().stroke(canEdit ? Color.white : Color.white.opacity(0.35), lineWidth: 2)
+                .frame(width: visibleCrop.width, height: visibleCrop.height)
+                .position(x: visibleCrop.midX, y: visibleCrop.midY).allowsHitTesting(false)
+            if canEdit {
+                ForEach([Corner.topLeft, .topRight, .bottomLeft, .bottomRight], id: \.self) { corner in
+                    CropHandle().position(handlePosition(corner, frame: visibleCrop))
+                        .gesture(resizeGesture(corner, imageRect: imageRect))
                 }
             }
-            VStack {
-                HStack {
-                    Text(title).font(.caption.weight(.medium)).padding(.horizontal, 10).padding(.vertical, 5)
-                        .background(.black.opacity(0.55), in: Capsule())
-                    Spacer()
-                    if progress { ProgressView().controlSize(.small).padding(8) }
-                }
-                Spacer()
-                HStack {
-                    if canEdit {
-                        Text("拖动边框调整裁剪 · 四角自由裁剪")
-                            .font(.caption2).foregroundStyle(.white.opacity(0.72))
-                            .padding(.horizontal, 9).padding(.vertical, 4)
-                            .background(.black.opacity(0.48), in: Capsule())
-                    }
-                    Spacer()
-                    if let subtitle {
-                        Text(subtitle).font(.caption2).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-                            .padding(.horizontal, 10).padding(.vertical, 4).background(.black.opacity(0.5), in: Capsule())
-                    }
-                }
-            }.padding(14)
-        }
-        .padding(inset)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    private func fittedImageRect(in canvas: CGSize) -> CGRect {
-        let available = CGSize(width: max(1, canvas.width), height: max(1, canvas.height))
-        let imageRatio = CGFloat(image.width) / CGFloat(max(1, image.height))
-        let availableRatio = available.width / available.height
-        if imageRatio >= availableRatio {
-            let width = available.width
-            let height = width / imageRatio
-            return CGRect(x: 0, y: (available.height - height) / 2, width: width, height: height)
-        } else {
-            let height = available.height
-            let width = height * imageRatio
-            return CGRect(x: (available.width - width) / 2, y: 0, width: width, height: height)
-        }
-    }
-
-    private func cropFrame(for rect: CropRect, in imageRect: CGRect) -> CGRect {
-        CGRect(x: imageRect.minX + imageRect.width * CGFloat(rect.x),
-               y: imageRect.minY + imageRect.height * CGFloat(rect.y),
-               width: imageRect.width * CGFloat(rect.width),
-               height: imageRect.height * CGFloat(rect.height))
+        }.frame(width: transform.viewportSize.width, height: transform.viewportSize.height, alignment: .topLeading)
     }
 
     private func handlePosition(_ corner: Corner, frame: CGRect) -> CGPoint {
@@ -539,7 +610,6 @@ private struct CropPreviewPane: View {
             .onChanged { value in
                 if gestureStart == nil {
                     gestureStart = cropRect
-                    interaction = .move
                     onEditingChanged(true)
                 }
                 guard let start = gestureStart else { return }
@@ -551,7 +621,6 @@ private struct CropPreviewPane: View {
             }
             .onEnded { _ in
                 gestureStart = nil
-                interaction = nil
                 onEditingChanged(false)
             }
     }
@@ -561,7 +630,6 @@ private struct CropPreviewPane: View {
             .onChanged { value in
                 if gestureStart == nil {
                     gestureStart = cropRect
-                    interaction = .resize(corner)
                     onEditingChanged(true)
                 }
                 guard let start = gestureStart else { return }
@@ -571,7 +639,6 @@ private struct CropPreviewPane: View {
             }
             .onEnded { _ in
                 gestureStart = nil
-                interaction = nil
                 onEditingChanged(false)
             }
     }
@@ -615,47 +682,40 @@ private struct CropHandle: View {
     }
 }
 
-/// Interactive first-generation local mask overlay. Coordinates match LocalMask's
-/// normalized top-left coordinate system and the crop canvas's fitted image.
+/// Mask controls stay in view points while their image geometry follows zoom/pan.
 private struct MaskOverlayPane: View {
-    let image: CGImage
+    let transform: ViewportTransform
     let mask: LocalMask
     let overlay: CGImage?
     let onChange: (LocalMask) -> Void
     let onEditingChanged: (Bool) -> Void
     @State private var startMask: LocalMask?
 
-    private let inset: CGFloat = 26
-
     var body: some View {
-        GeometryReader { proxy in
-            let imageRect = fittedImageRect(in: proxy.size)
-            let frame = maskFrame(mask, in: imageRect)
-            ZStack {
-                if let overlay {
-                    Image(decorative: overlay, scale: 1).resizable()
-                        .frame(width: imageRect.width, height: imageRect.height)
-                        .position(x: imageRect.midX, y: imageRect.midY).allowsHitTesting(false)
-                }
-                maskShape(frame: frame, imageRect: imageRect)
-                    .allowsHitTesting(false)
-                Rectangle()
-                    .fill(.clear)
-                    .contentShape(Rectangle())
-                    .frame(width: frame.width, height: frame.height)
-                    .position(x: frame.midX, y: frame.midY)
-                    .gesture(moveGesture(imageRect: imageRect))
-                MaskHandle().position(x: frame.midX, y: frame.midY)
-                    .gesture(moveGesture(imageRect: imageRect))
-                ForEach(MaskCorner.allCases, id: \.self) { corner in
-                    MaskHandle()
-                        .position(handlePosition(corner, frame: frame))
-                        .gesture(resizeGesture(corner, imageRect: imageRect))
-                }
+        let imageRect = transform.imageRect
+        let frame = transform.viewRect(for: CGRect(x: mask.x, y: mask.y, width: mask.width, height: mask.height))
+        ZStack(alignment: .topLeading) {
+            if let overlay {
+                Image(decorative: overlay, scale: 1).resizable()
+                    .frame(width: imageRect.width, height: imageRect.height)
+                    .position(x: imageRect.midX, y: imageRect.midY).allowsHitTesting(false)
             }
-        }
-        .clipped()
-        .padding(inset)
+            maskShape(frame: frame, imageRect: imageRect)
+                .allowsHitTesting(false)
+            Rectangle()
+                .fill(.clear)
+                .contentShape(Rectangle())
+                .frame(width: frame.width, height: frame.height)
+                .position(x: frame.midX, y: frame.midY)
+                .gesture(moveGesture(imageRect: imageRect))
+            MaskHandle().position(x: frame.midX, y: frame.midY)
+                .gesture(moveGesture(imageRect: imageRect))
+            ForEach(MaskCorner.allCases, id: \.self) { corner in
+                MaskHandle()
+                    .position(handlePosition(corner, frame: frame))
+                    .gesture(resizeGesture(corner, imageRect: imageRect))
+            }
+        }.frame(width: transform.viewportSize.width, height: transform.viewportSize.height, alignment: .topLeading)
     }
 
     @ViewBuilder private func maskShape(frame: CGRect, imageRect: CGRect) -> some View {
@@ -675,34 +735,12 @@ private struct MaskOverlayPane: View {
                 .frame(width: frame.width, height: frame.height)
                 .position(x: frame.midX, y: frame.midY)
             Path { path in
-                let geometry = MaskGeometry(mask, imageSize: imageRect.size)
+                let geometry = MaskGeometry(mask, imageSize: transform.imageSize)
                 let points = geometry.linearEndpoints
-                path.move(to: CGPoint(x: imageRect.minX + points.start.x, y: imageRect.minY + points.start.y))
-                path.addLine(to: CGPoint(x: imageRect.minX + points.end.x, y: imageRect.minY + points.end.y))
+                path.move(to: transform.viewPoint(forImagePoint: points.start))
+                path.addLine(to: transform.viewPoint(forImagePoint: points.end))
             }.stroke(color.opacity(0.75), style: StrokeStyle(lineWidth: 1, dash: [4, 4]))
         }
-    }
-
-    private func fittedImageRect(in canvas: CGSize) -> CGRect {
-        let available = CGSize(width: max(1, canvas.width), height: max(1, canvas.height))
-        let imageRatio = CGFloat(image.width) / CGFloat(max(1, image.height))
-        let availableRatio = available.width / available.height
-        if imageRatio >= availableRatio {
-            let width = available.width
-            let height = width / imageRatio
-            return CGRect(x: 0, y: (available.height - height) / 2, width: width, height: height)
-        } else {
-            let height = available.height
-            let width = height * imageRatio
-            return CGRect(x: (available.width - width) / 2, y: 0, width: width, height: height)
-        }
-    }
-
-    private func maskFrame(_ mask: LocalMask, in imageRect: CGRect) -> CGRect {
-        CGRect(x: imageRect.minX + imageRect.width * CGFloat(mask.x),
-               y: imageRect.minY + imageRect.height * CGFloat(mask.y),
-               width: imageRect.width * CGFloat(mask.width),
-               height: imageRect.height * CGFloat(mask.height))
     }
 
     private enum MaskCorner: CaseIterable, Hashable {

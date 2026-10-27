@@ -65,6 +65,30 @@ import LumaCore
             restored.tool = .browse
             await restored.waitForPreview()
             precondition(!restored.previewIsFullFrame)
+            let source = restored.canvasRenderState!
+            let stateBeforeDetail = restored.settings, undoCount = restored.history.undoStack.count
+            let detail = try await restored.renderDetail(DetailTileID(x: 0, y: 0), source: source)
+            precondition(detail.fullSize == source.size)
+            precondition(restored.settings == stateBeforeDetail && restored.history.undoStack.count == undoCount,
+                         "Loading detail must not alter the recipe or edit history")
+            restored.set(\.exposure, value: restored.settings.exposure + 0.4)
+            do { _ = try await restored.renderDetail(DetailTileID(x: 0, y: 0), source: source); preconditionFailure("Stale exposure detail accepted") }
+            catch is CancellationError { }
+            await restored.waitForPreview()
+            let edited = restored.canvasRenderState!
+            precondition(edited != source)
+            restored.compare = true
+            let original = restored.canvasRenderState!
+            precondition(original.settings == restored.photo!.initial)
+            precondition(original.size == CGSize(width: restored.photo!.width, height: restored.photo!.height))
+            _ = try await restored.renderDetail(DetailTileID(x: 0, y: 0), source: original)
+            restored.compare = false
+            restored.tool = .crop; await restored.waitForPreview()
+            precondition(restored.canvasRenderState!.settings.cropRect == .full)
+            await restored.open(sampleURL.deletingLastPathComponent().appendingPathComponent("match-source.png")).value
+            do { _ = try await restored.renderDetail(DetailTileID(x: 0, y: 0), source: edited); preconditionFailure("Previous photo detail accepted") }
+            catch is CancellationError { }
+            print("PASS: native detail state, stale edit/photo rejection, original/full-frame geometry and unchanged recipe/history")
         }
         print("PASS: mask/crop rotation, undo selection, busy protection, valid mask limit, atomic draft, selection persistence and failed draft preservation")
     }

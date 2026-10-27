@@ -1,5 +1,11 @@
 # Luma RAW · Local-first RAW 照片编辑器
 
+文档入口：[开发进度](DEVELOPMENT_STATUS.md) · [下一阶段计划](ROADMAP.md) · [同行调研](COMPETITOR_RESEARCH.md)。
+
+本地开发进展（2026-10-27）：已加入原始分辨率细节查看。点击画布上方「100%」后，一个照片像素对应一个屏幕物理像素；菜单提供 50% / 100% / 200%，也可用按钮或捏合连续缩放。画布会先显示底图，再逐块补上当前视口的细节，底栏显示加载进度；完成后显示「原始细节」。适合窗口且底图已足够清晰时，不额外触发全分辨率解码。0.5 的直方图与溢出提示尚未实现，整版尚未发布。
+
+浏览模式直接拖动平移，裁剪/蒙版模式按住空格拖动平移，也可滚动平移、⌘＋滚轮缩放。浏览模式双击或触控板双指轻点在 100% 与适合窗口间切换。照片、裁剪框和蒙版共用坐标变换，手柄保持固定大小。查看操作不修改配方或调色撤销记录；切图、切工具、旋转或切换原片比较时恢复适合窗口。
+
 项目名：**Luma RAW**。建议 GitHub 仓库名：`luma-raw-editor`。图标源文件位于 `Art/AppIcon.png`，构建脚本会生成 `AppIcon.icns` 并写入应用包；`.github/workflows/macos.yml` 会在 GitHub Actions 上运行构建检查，`.github/workflows/release.yml` 会在推送 `v*` 标签时构建并创建 macOS Release。完整开发进度见 [DEVELOPMENT_STATUS.md](DEVELOPMENT_STATUS.md)。
 
 这是已实际编译、启动并验证的 SwiftUI 原生应用，不是界面设计稿。支持 macOS 13+；随附应用为本机编译的 Apple Silicon / arm64 版本，Intel Mac 可从源码重新构建。无第三方运行依赖。
@@ -77,7 +83,7 @@ bash scripts/build.sh --check
 - 明确保留解码器默认 SDR 影调（`extendedDynamicRangeAmount = 0`）。本版不把 boostAmount 强行清零，也不再叠加第二套自动 HDR→SDR 映射。曝光调整发生在解码器 SDR 成像之前；RAW 输出本身不是未经处理的场景线性数据。
 - 普通图片：Core Image 读取嵌入 ICC，按 EXIF 方向转正。无配置的 RGB 采用 CI 默认 sRGB；白平衡是相对 6500 K 的温度/色调变化，不宣称恢复传感器白平衡。
 - 共同后处理：可选 CIToneCurve → 饱和度 → 90° 旋转 → 径向/线性局部蒙版 → 自定义裁剪框 → 参考图追色。蒙版和裁剪框都以转正后图像左上角为坐标原点，保存归一化的 x/y/宽/高，预览和导出使用同一像素边界。
-- 预览与导出共用 `processed`。预览长边最多 1800，RAW 通过 scaleFactor 减少解码工作，RGB 使用 Lanczos 缩小。滑块 90 ms 去抖，并取消尚未开始的旧任务、丢弃过期结果。ImageIO 缩略图在初次完整预览之前临时显示。
+- 预览与导出共用 `processed`。交互底图长边最多 1800，RAW 通过 scaleFactor 减少解码工作，RGB 使用 Lanczos 缩小；原生细节另用全分辨率管线按视口分块渲染。滑块 90 ms 去抖，并取消尚未开始的旧任务、丢弃过期结果。ImageIO 缩略图在初次完整预览之前临时显示。
 - 最后才转换到 sRGB 和整数输出。JPEG 为 8 bit、质量 0.94；TIFF 为 16 bit 整数。透明像素统一合成黑底。导出总是使用全分辨率解码，且包含实际裁剪。
 
 浮点工作缓冲避免过早的 8 位量化；它不意味着本版保留 HDR 输出。RAW 解码器的默认 SDR 成像以及用户曲线仍会改变高光，最终 sRGB 输出也会限制色域/范围。
@@ -121,8 +127,8 @@ bash scripts/build.sh --check
 - 追色使用合成色彩素材验证算法和管线闭环；尚未用大量真实人像、风景及跨相机 RAW 做主观画质评估，颜色分布匹配不能替代人工调色。
 - 当前蒙版包含径向/有范围的线性渐变；没有画笔、颜色/亮度范围或主体识别。修复版增加选区外保持不变、透明度、反向、方向、导出及旋转组合的回归检查。实际验证状态见 DEVELOPMENT_STATUS.md。
 - 未做大像素 RAW 的交互帧率或峰值内存基准。已完成的 GPU 渲染不能中途取消；新参数需等待当前工作结束，但不会用过时结果覆盖新预览。
-- 缩小解码、滤镜插值和裁剪像素取整可能造成预览与大尺寸导出之间的小差异；不是 100% 像素审片工具。
-- 裁剪框支持自由比例和移动，旋转仅 90°；没有拉直。没有直方图、缩放平移、持久化图库、批量处理、HDR、Vision 标签或 Photoshop 图层。
+- 交互底图的缩小解码与滤镜插值可能使它与全分辨率结果有小差异；100% 细节加载完成后使用全分辨率管线，已核对对应 TIFF 区域。视口仍是 SDR sRGB / 8 bit 显示，不代表 HDR 或 16 bit 屏幕输出。
+- 裁剪框支持自由比例和移动，旋转仅 90°；没有拉直。已支持缩放平移和原始分辨率 100% 查看；没有直方图、持久化图库、批量处理、HDR、Vision 标签或 Photoshop 图层。
 - 原生 GUI 冒烟验证覆盖启动/导入/预览及截图；没有自动化点击所有文件面板和滑块，也未在 macOS 13 或 Intel 真机运行。
 
 ## 源码结构
@@ -130,11 +136,14 @@ bash scripts/build.sh --check
 - `Sources/LumaCore/PhotoFolder.swift`：文件夹扫描、格式筛选和自然排序。
 - `Sources/LumaCore/Recipe.swift`：可版本化配方、参数验证和编辑历史。
 - `Sources/LumaCore/MaskGeometry.swift`：画布与渲染共用的蒙版几何。
+- `Sources/LumaCore/ViewportTransform.swift`：物理像素倍率、实际显示比例、画布变换、坐标转换与边界限制。
+- `Sources/LumaCore/DetailPreview.swift`：视口分块规划、采样层级与全分辨率输出尺寸。
 - `Sources/LumaCore/DraftStore.swift`：原子草稿保存、校验和恢复。
 - `Sources/LumaCore/ColorMatch.swift`：追色统计、颜色分簇、对应关系及可保存的颜色/明暗映射。
 - `Sources/LumaCore/ImageEngine.swift`：导入、RAW/普通图片管线、颜色管理、局部蒙版、元数据和导出。
 - `Sources/LumaRAW/EditorModel.swift`：文档状态、异步预览、文件面板和配方操作。
 - `Sources/LumaRAW/LumaRAWApp.swift`：SwiftUI 窗口、检查器、曲线示意和菜单。
+- `Sources/LumaRAW/CanvasNavigation.swift`：限定于当前画布的原生输入路由，协调平移、缩放与编辑手势。
 - `Tests/LumaCoreTests`：测试；`scripts/CheckMain.swift` 使其能在仅有 CLT 的环境独立运行。
 
 参考：[Apple CIRAWFilter](https://developer.apple.com/documentation/coreimage/cirawfilter)、[RAW EDR 设置](https://developer.apple.com/documentation/coreimage/cirawfilter/extendeddynamicrangeamount)、[ImageIO DNG 元数据](https://developer.apple.com/documentation/imageio/dng-image-properties)。实现同时核对了本机 SDK 的 CIRAWFilter.h。
@@ -143,4 +152,20 @@ bash scripts/build.sh --check
 
 `bash scripts/build.sh --check` 执行完整检查，包括像素渲染、自动草稿重新打开、文件夹和追色模型集成。仅需检查几何、配方、算法和文档状态时，可运行 `bash scripts/build.sh --check-model`；该模式明确排除像素测试，不能代替完整检查。
 
+2026-10-27 已核实 0.4 提交 `df60bb7` 的 [GitHub CI](https://github.com/pw0rld/luma-raw-editor/actions/runs/40184283821) 通过完整检查，含 182 项核心断言。当前本地原生细节改动在系统图形环境下也通过完整 `--check`：276 项核心断言、草稿恢复、文件夹/追色集成及原生输入检查。受限执行环境无法连接窗口服务或创建 Core Image 预览时，须在允许访问系统图形服务的环境验证；这类环境失败不能用 `--check-model` 的结果替代。已补充 24MP 合成 RGB 的单次查看基准；真实相机 RAW、大规模相机兼容及交互性能仍需进一步评估。
+
 Release 构建会校验标签、Info.plist、发布说明、arm64 二进制及签名。若本机 iconutil 无法打包有效的 iconset，脚本会使用已校验 PNG 尺寸的 ICNS 封装备用实现。
+
+
+## 原始分辨率细节查看
+
+- 100% / 200% 分别为每个处理后照片像素占 1 / 2 个屏幕物理像素。读取实际窗口 backing scale，窗口变化或移动显示器后维持该倍率；适合窗口则随窗口调整。
+- 底图满足当前显示像素需求时复用底图；需要更多细节时，在完整显影、旋转、局部调整、裁剪和追色之后切出当前视口，保持邻域滤镜和蒙版羽化。RAW 细节使用独立的全分辨率解码器实例，避免预览缩小参数影响细节。
+- 1024×1024 分块带 2 像素重叠边缘；低倍率使用二次幂采样层级，100% 及以上直接渲染原始像素，放大显示采用最近邻插值。分块按视口中心优先加载，平移复用已有分块。
+- 渲染器的分块 LRU 上限 48 MiB；画布仅保留当前计划中的分块，单次计划最多 64 块。这个上限只约束分块图像，不涵盖 RAW 解码缓冲、Core Image/Metal 缓存或窗口资源。RAW 解码器仍可能完整解码原片，不能视为严格的区域 RAW 解码。
+- 曝光、裁剪、蒙版、追色、照片或显示比例变化后丢弃过期结果；加载不修改配方和撤销历史。已开始的 GPU 工作不能中途抢占，更新的请求会等待它结束。
+- 复杂蒙版叠加追色时，在浮点工作空间插入中间渲染节点，避免本机 Metal 编译器将过大的滤镜图融合而崩溃。预览、细节与导出仍复用同一调整管线。
+
+验证包含 Retina 1×/2× 比例数学检查、真实 2× Retina 窗口、单像素纹理、分块重叠接缝、非对称裁剪＋旋转＋两种蒙版＋追色、RAW、缓存复用/淘汰、取消及旧照片/参数结果拒绝。RGB 细节与 16 位 TIFF 对应区域平均字节误差约 0.00118（8 位通道尺度），属于本次合成素材的一致性检查，不是摄影画质评分。
+
+`scripts/DetailBench.swift` 可分别运行 `create` 和 `run`，避免素材生成影响查看进程测量。本机 M1 Max 单次 6000×4000 合成 RGB 基准：打开约 58 ms、1800 像素底图约 79 ms、首批 100% 视口 4 块约 29 ms、5 次平移共约 20 ms，分块缓存约 40.8 MiB；最大驻留集约 204 MiB，系统报告峰值内存 footprint 约 505 MiB。测量未包含完整 UI，不能据此推算真实相机 RAW 的延迟、帧率或内存。

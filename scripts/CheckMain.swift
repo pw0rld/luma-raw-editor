@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import LumaCore
 
 // A tiny XCTest-compatible runner so the same assertions can run with CLT alone.
@@ -23,10 +24,24 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
 }
 @main struct CheckMain {
     static func main() async throws {
+        setbuf(stdout, nil)
+        if CommandLine.arguments.contains("--detail-only") {
+            let details = DetailPreviewTests()
+            try await details.testNativeTilesMatchExportAndPreserveFineDetail()
+            try await details.testSampledTileEdgesAndRAWDetail()
+            print("PASS: \(assertionCount) detail assertions")
+            return
+        }
         let suite = LumaCoreTests()
         try suite.testRecipeRoundTripAndRejection()
         try suite.testLocalMaskRecipeValidationAndLegacyDefaults()
         suite.testHistoryBranchingAndBound()
+        let viewport = ViewportTests()
+        viewport.testFitAndPixelCoordinateRoundTrip()
+        viewport.testAnchoredZoomAndBoundedPan()
+        viewport.testOverlayAndDragGeometryAtDifferentZooms()
+        viewport.testResizeContinuityAndInvalidInput()
+        try viewport.testNativeScaleRetinaAndTilePlans()
         let stability = StabilityTests()
         try stability.testMaskAndCropRotationPreservesContent()
         stability.testLinearCoverageOpacityAndFeatherGeometry()
@@ -52,6 +67,9 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
         try await match.testMatchedBitmapPipelineAndEmbeddedRecipe()
         try await match.testMatchedRAWPipelineIfProvided()
         try await match.testCustomCropAndLegacyRecipeMigration()
+        let details = DetailPreviewTests()
+        try await details.testNativeTilesMatchExportAndPreserveFineDetail()
+        try await details.testSampledTileEdgesAndRAWDetail()
         print("PASS: \(assertionCount) assertions; recipe/history/orientation/masks/color/metadata/export/source protection/reference matching")
     }
 }

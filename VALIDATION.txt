@@ -70,3 +70,44 @@ Complete pixel suite: NOT VERIFIED locally. Baseline Core Image createCGImage fa
 Native validation helper launch is unavailable here (LaunchServices kLSNoExecutableErr).
 CI --check remains mandatory and includes mask coverage, opacity, feather/inversion, rotation, TIFF/RAW, tight crop analysis and draft reopen tests.
 The --check-model mode explicitly excludes pixel rendering and is not a replacement for --check.
+
+2026-10-27 — viewport navigation, local 0.5 first stage (unreleased)
+Verified baseline df60bb7 on GitHub Actions run 40184283821: SUCCESS.
+Baseline CI: macOS 15.7.9 arm64, Swift 6.1.2, 182 core assertions and all model integration checks PASS.
+Current local build: complete scripts/build.sh --check in the system graphics environment: PASS.
+223 core assertions: PASS, including 41 new viewport assertions.
+Native canvas event routing: PASS (drag, flipped deltas, paired events, space/edit routing, text input, other-window isolation, focus reset).
+State model with actual rendered draft restore: PASS.
+Folder and reference matching integration checks: PASS.
+Core Image backend: Metal / Apple M1 Max; synthetic-bayer.dng decoder 8.dng.
+Restricted execution cannot create a native WindowServer window number or render a Core Image preview.
+Running the same checks with access to system graphics services resolves those environment failures.
+UI scale remains relative to Fit with the existing <=1800px preview; no source-resolution 100% inspection claim.
+Final native window smoke: synthetic source/reference import, matching, aligned reference/target layout, screenshot and clean exit PASS.
+Smoke used a separate bundle identifier and a temporary draft path; the user's saved workspace was not loaded.
+Final application signature and canvas-preview ZIP integrity: PASS.
+Canvas preview ZIP SHA-256: bdcc4c8fed0f29d265526f7bba20a30ec8adc45fdde0c57a97787db6bba829f5.
+Not yet validated: broad real-camera RAW support, large-image memory/latency, macOS 13 / Intel hardware.
+
+2026-10-27 — source-resolution detail viewing (local preview, unreleased)
+Complete build.sh --check: PASS, 276 core assertions plus all state/native-input/folder/reference integration checks.
+100% definition: one processed source pixel per screen backing pixel; pure 1x/2x backing tests PASS.
+Native Retina window: RGB 6000x4000 at 100% and 200%, backing=2, four visible native tiles: PASS.
+Native Retina window: synthetic DNG 1024x768 at 100%, backing=2, one native tile: PASS.
+Smoke waits for actual tile completion, uses separate bundle identifier and isolated draft paths.
+Native tiles vs 16-bit TIFF after asymmetric crop, quarter-turn, radial/linear masks and reference match: PASS.
+Maximum tested mean 8-bit byte error: 0.0011760169654906497.
+One-pixel texture preservation, sampled overlap seam, RAW detail/export, cached tile reuse/eviction: PASS.
+Cancelled tile tasks, stale exposure/photo snapshots, original/full-frame settings, unchanged recipe/history: PASS.
+Fit reuses the base preview when it meets the display pixel budget; source-resolution work is requested on demand.
+Fixed a Core Image Metal DAG compiler crash in a complex mask+Lab-match export by inserting a float intermediate before the custom kernel.
+Tile cache bounded to 48 MiB; this does not include full-source decoding or Core Image/Metal allocations.
+24MP synthetic RGB standalone benchmark, M1 Max, one run (no full UI):
+  Open 0.0583s; base preview 0.0793s; first native four-tile viewport 0.0290s; cached viewport 0.000055s.
+  Five pans 0.0202s; cache 42,748,160 bytes / 10 tiles; maximum resident set 213,729,280 bytes.
+  System peak memory footprint 529,089,376 bytes (includes more than resident set).
+Benchmark fixture creation ran in a separate process; these figures do not predict real-camera RAW latency or memory.
+Source: scripts/DetailBench.swift, with separate create/run modes.
+Remaining hardware/data coverage: real-camera RAW sets, large RAW performance, macOS 13, Intel and physical non-Retina monitor migration.
+Final arm64 application signature and native-detail preview ZIP integrity: PASS.
+Native detail preview ZIP SHA-256: 6e640ea92a50f94a04d195ef1be802267baef51df387b3bdd5a39f3efae239f6.

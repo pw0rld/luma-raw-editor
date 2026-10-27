@@ -5,6 +5,14 @@ import LumaCore
 
 enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪", mask = "蒙版" }
 
+struct CanvasRenderState: Equatable {
+    let url: URL
+    let sha256: String
+    let settings: Adjustments
+    let profile: RAWProfile?
+    let size: CGSize
+}
+
 @MainActor final class EditorModel: ObservableObject {
     @Published var photos: [URL] = []
     @Published var includeSubfolders = true
@@ -50,6 +58,8 @@ enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪",
     private var gestureStart: Adjustments?
     private var savedSettings = Adjustments()
     private var renderedSettings: Adjustments?
+    private var detailSmokeSource: CanvasRenderState?
+    private var detailSmokeSummary: String?
     private let draftStore: DraftStore?
     private var draftTask: Task<Void, Never>?
     private var restoringDraft = false
@@ -64,6 +74,39 @@ enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪",
     var canUndo: Bool { !history.undoStack.isEmpty }
     var canRedo: Bool { !history.redoStack.isEmpty }
     var canMatch: Bool { photo != nil && referencePhoto != nil && !busy }
+    var canvasImageSize: CGSize? {
+        guard let photo, let state = compare ? photo.initial : renderedSettings else { return nil }
+        return photo.outputSize(for: state)
+    }
+    var canvasRenderState: CanvasRenderState? {
+        guard let photo, !busy, !rendering else { return nil }
+        var state: Adjustments
+        if compare { state = photo.initial }
+        else {
+            guard let renderedSettings else { return nil }
+            var expected = settings
+            if tool != .browse { expected.cropRect = .full }
+            guard renderedSettings == expected else { return nil }
+            state = renderedSettings
+        }
+        return CanvasRenderState(url: photo.url, sha256: photo.sha256, settings: state, profile: photo.profile, size: photo.outputSize(for: state))
+    }
+    func renderDetail(_ tile: DetailTileID, source: CanvasRenderState) async throws -> DetailTile {
+        try Task.checkCancellation()
+        guard canvasRenderState == source else { throw CancellationError() }
+        let renderer = engine
+        let result = try await renderer.detailTile(source.settings, profile: source.profile, tile: tile)
+        try Task.checkCancellation()
+        guard canvasRenderState == source else { throw CancellationError() }
+        guard result.fullSize == source.size else { throw EditorError.message("细节图像尺寸与预览不一致。") }
+        return result
+    }
+    func recordDetailSmoke(source: CanvasRenderState, pixelScale: CGFloat, backing: CGFloat, tiles: Int) {
+        guard let value = ProcessInfo.processInfo.environment["LUMA_SMOKE_DETAIL_SCALE"],
+              let expected = Double(value), abs(Double(pixelScale) - expected) < 1e-9, canvasRenderState == source else { return }
+        detailSmokeSource = source
+        detailSmokeSummary = "scale=\(pixelScale), backing=\(backing), tiles=\(tiles), size=\(source.size.width)x\(source.size.height)"
+    }
     var masks: [LocalMask] { settings.localMasks }
     var selectedMask: LocalMask? {
         guard let selectedMaskID else { return nil }
@@ -295,6 +338,15 @@ enum EditorTool: String, CaseIterable { case browse = "浏览", crop = "裁剪",
                     print(settings.colorMatch != nil && referencePreview != nil && self.error == nil
                           ? "UI_SMOKE_MATCH: reference loaded and color match rendered"
                           : "UI_SMOKE_MATCH: FAILED \(self.error ?? "missing reference or match")")
+                }
+                if ProcessInfo.processInfo.environment["LUMA_SMOKE_DETAIL_SCALE"] != nil {
+                    for _ in 0..<300 {
+                        if let current = canvasRenderState, current == detailSmokeSource { break }
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    print(detailSmokeSource == canvasRenderState && detailSmokeSource != nil
+                          ? "UI_SMOKE_DETAIL: \(detailSmokeSummary ?? "")"
+                          : "UI_SMOKE_DETAIL: FAILED")
                 }
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 if let view = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView,

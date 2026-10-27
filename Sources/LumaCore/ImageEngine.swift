@@ -28,6 +28,12 @@ public actor ImageEngine {
     private var info: PhotoInfo?
     private var raw: CIRAWFilter?
     private var bitmap: CIImage?
+    private var detailRaw: CIRAWFilter?
+    private var detailGraph: (settings: Adjustments, profile: RAWProfile?, image: CIImage)?
+    private var detailTiles: [DetailTile] = []
+    public static let detailCacheByteLimit = 48 * 1024 * 1024
+    private let detailCacheLimit: Int
+    private var detailCacheBytes = 0
     private var properties: [String: Any] = [:]
     private let optionalRAWKeys = [
         ("isLocalToneMapSupported", "localToneMapAmount"),
@@ -36,7 +42,8 @@ public actor ImageEngine {
         ("isSharpnessSupported", "sharpnessAmount"), ("isContrastSupported", "contrastAmount"),
         ("isDetailSupported", "detailAmount"), ("isMoireReductionSupported", "moireReductionAmount")]
 
-    public init() {
+    public init(detailCacheLimit: Int = ImageEngine.detailCacheByteLimit) {
+        self.detailCacheLimit = max(0, min(Self.detailCacheByteLimit, detailCacheLimit))
         let options: [CIContextOption: Any] = [.workingColorSpace: Self.workingSpace,
             .workingFormat: CIFormat.RGBAh, .cacheIntermediates: true]
         if let device = MTLCreateSystemDefaultDevice() {
@@ -95,6 +102,7 @@ public actor ImageEngine {
         let nextInfo = PhotoInfo(url: url, sha256: digest, isRAW: isRAW, width: Int(extent.width), height: Int(extent.height), initial: initial, profile: profile, backend: backend, camera: tiff[kCGImagePropertyTIFFModel as String] as? String ?? "")
         // Commit only after a successful open, so a bad file doesn't destroy the current document.
         raw = nextRaw; bitmap = nextBitmap; properties = props; info = nextInfo
+        detailRaw = nil; detailGraph = nil; detailTiles = []; detailCacheBytes = 0
         context.clearCaches()
         return nextInfo
     }
@@ -203,11 +211,11 @@ public actor ImageEngine {
     }
 
     // Preview and export differ only in decoding/output resolution, never in adjustment order.
-    private func processed(_ settings: Adjustments, profile: RAWProfile?, maxDimension: CGFloat?) throws -> CIImage {
+    private func processed(_ settings: Adjustments, profile: RAWProfile?, maxDimension: CGFloat?, rawOverride: CIRAWFilter? = nil) throws -> CIImage {
         try Task.checkCancellation(); try settings.validate()
         guard let info else { throw EditorError.message("请先导入照片。") }
         var image: CIImage
-        if let raw {
+        if let raw = rawOverride ?? self.raw {
             guard let profile else { throw EditorError.message("缺少 RAW 显影配置。") }
             let recipe = Recipe(sourceName: info.url.lastPathComponent, sourceSHA256: info.sha256, rawProfile: profile, adjustments: settings)
             try recipe.validate(); try applyProfile(profile, to: raw)
@@ -254,7 +262,12 @@ public actor ImageEngine {
                                           height: min(cropHeight, e.height - cropY)))
         image = image.transformed(by: CGAffineTransform(translationX: -image.extent.minX, y: -image.extent.minY))
         if let maxDimension { image = scaled(image, maxDimension: maxDimension) }
-        if let match = settings.colorMatch { image = try match.applying(to: image) }
+        if let match = settings.colorMatch {
+            // Prevent the Metal compiler fusing the custom Lab kernel into a
+            // complex mask DAG; keep the intermediate in the context's float space.
+            if settings.localMasks.contains(where: { !$0.isNeutral }) { image = image.insertingIntermediate() }
+            image = try match.applying(to: image)
+        }
         return image
     }
     private func scaled(_ image: CIImage, maxDimension: CGFloat) -> CIImage {
@@ -267,6 +280,50 @@ public actor ImageEngine {
         guard let result = context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: Self.outputSpace) else { throw EditorError.message("预览渲染失败。") }
         return result
     }
+
+    /// Full-resolution processing precedes the viewport cut, preserving filter
+    /// neighborhoods, mask feather, crop, rotation and matching exactly as export.
+    public func detailTile(_ settings: Adjustments, profile: RAWProfile?, tile id: DetailTileID) throws -> DetailTile {
+        try Task.checkCancellation()
+        guard let info else { throw EditorError.message("请先导入照片。") }
+        try settings.validate()
+        _ = try DetailPlan.renderRect(for: id, fullSize: info.outputSize(for: settings))
+        if detailGraph?.settings != settings || detailGraph?.profile != profile {
+            detailGraph = nil; detailTiles = []; detailCacheBytes = 0
+            if raw != nil, detailRaw == nil {
+                detailRaw = CIRAWFilter(imageURL: info.url)
+                guard detailRaw != nil else { throw EditorError.message("无法创建原始分辨率 RAW 解码器。") }
+            }
+            let image = try processed(settings, profile: profile, maxDimension: nil, rawOverride: detailRaw)
+            detailGraph = (settings, profile, image)
+        }
+        if let index = detailTiles.firstIndex(where: { $0.id == id }) {
+            let cached = detailTiles.remove(at: index); detailTiles.append(cached)
+            return cached
+        }
+        guard let graph = detailGraph?.image else { throw EditorError.message("细节图像不可用。") }
+        let fullSize = graph.extent.size
+        let rect = try DetailPlan.renderRect(for: id, fullSize: fullSize)
+        let background = CIImage(color: .black).cropped(to: graph.extent)
+        var output = graph.composited(over: background)
+        if id.divisor > 1 { output = output.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: 1 / Double(id.divisor), kCIInputAspectRatioKey: 1]) }
+        let bounds = CGRect(x: rect.minX, y: output.extent.maxY - rect.maxY, width: rect.width, height: rect.height)
+        try Task.checkCancellation()
+        guard let image = context.createCGImage(output, from: bounds, format: .RGBA8, colorSpace: Self.outputSpace) else {
+            throw EditorError.message("原始分辨率细节渲染失败。")
+        }
+        try Task.checkCancellation()
+        let result = DetailTile(id: id, image: image,
+            sourceRect: CGRect(x: rect.minX * CGFloat(id.divisor), y: rect.minY * CGFloat(id.divisor),
+                               width: rect.width * CGFloat(id.divisor), height: rect.height * CGFloat(id.divisor)), fullSize: fullSize)
+        let cost = image.bytesPerRow * image.height
+        while detailCacheBytes + cost > detailCacheLimit, !detailTiles.isEmpty {
+            let removed = detailTiles.removeFirst(); detailCacheBytes -= removed.image.bytesPerRow * removed.image.height
+        }
+        if cost <= detailCacheLimit { detailTiles.append(result); detailCacheBytes += cost }
+        return result
+    }
+    public func detailCacheUsage() -> (tiles: Int, bytes: Int) { (detailTiles.count, detailCacheBytes) }
     /// Exact coverage, rendered separately from the photograph for the canvas.
     public func previewMask(_ mask: LocalMask, width: Int, height: Int) throws -> CGImage {
         try mask.validate(); try Task.checkCancellation()
