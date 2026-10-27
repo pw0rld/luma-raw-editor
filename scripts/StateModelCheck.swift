@@ -71,13 +71,44 @@ import LumaCore
             precondition(detail.fullSize == source.size)
             precondition(restored.settings == stateBeforeDetail && restored.history.undoStack.count == undoCount,
                          "Loading detail must not alter the recipe or edit history")
+            let histogramSource = restored.histogramRenderState!
+            await restored.loadHistogram(histogramSource)
+            let histogram = restored.histogram!
+            precondition(histogram.previewWidth == Int(histogramSource.size.width))
+            precondition(histogram.previewHeight == Int(histogramSource.size.height))
+            restored.toggleClipping()
+            precondition(restored.clippingOptions == .all)
+            let overlay = try await restored.renderClipping(detail.image, source: source, options: .all)
+            precondition(overlay?.width == detail.image.width)
+            restored.showShadowClipping = false
+            do { _ = try await restored.renderClipping(detail.image, source: source, options: .all); preconditionFailure("Stale clipping options accepted") }
+            catch is CancellationError { }
+            restored.toggleClipping()
+            precondition(restored.clippingOptions.isEmpty)
+            precondition(restored.settings == stateBeforeDetail && restored.history.undoStack.count == undoCount,
+                         "Histogram and clipping switches must not change the recipe/history")
+            restored.tool = .mask; await restored.waitForPreview()
+            precondition(restored.histogramRenderState == histogramSource, "Edit-tool full frame must not change the histogram's final crop")
+            await restored.loadHistogram(restored.histogramRenderState)
+            precondition(restored.histogram == histogram)
+            restored.tool = .browse; await restored.waitForPreview()
             restored.set(\.exposure, value: restored.settings.exposure + 0.4)
+            precondition(restored.histogram == nil, "Stale statistics must immediately disappear while rendering a new edit")
+            await restored.loadHistogram(histogramSource)
+            precondition(restored.histogram == nil)
             do { _ = try await restored.renderDetail(DetailTileID(x: 0, y: 0), source: source); preconditionFailure("Stale exposure detail accepted") }
             catch is CancellationError { }
             await restored.waitForPreview()
             let edited = restored.canvasRenderState!
             precondition(edited != source)
+            let pendingSource = restored.histogramRenderState
+            let pendingHistogram = Task { await restored.loadHistogram(pendingSource) }
+            await Task.yield()
             restored.compare = true
+            await pendingHistogram.value
+            precondition(restored.histogram == nil)
+            await restored.loadHistogram(restored.histogramRenderState)
+            precondition(restored.histogram!.previewWidth == restored.photo!.width)
             let original = restored.canvasRenderState!
             precondition(original.settings == restored.photo!.initial)
             precondition(original.size == CGSize(width: restored.photo!.width, height: restored.photo!.height))
@@ -86,9 +117,14 @@ import LumaCore
             restored.tool = .crop; await restored.waitForPreview()
             precondition(restored.canvasRenderState!.settings.cropRect == .full)
             await restored.open(sampleURL.deletingLastPathComponent().appendingPathComponent("match-source.png")).value
+            await restored.loadHistogram(histogramSource)
+            precondition(restored.histogram == nil, "An old photo's histogram must be rejected")
+            await restored.loadHistogram(restored.histogramRenderState)
+            precondition(restored.histogram != nil)
             do { _ = try await restored.renderDetail(DetailTileID(x: 0, y: 0), source: edited); preconditionFailure("Previous photo detail accepted") }
             catch is CancellationError { }
             print("PASS: native detail state, stale edit/photo rejection, original/full-frame geometry and unchanged recipe/history")
+            print("PASS: final-crop histogram, original comparison, independent clipping switches, stale analysis/options rejection and unchanged recipe/history")
         }
         print("PASS: mask/crop rotation, undo selection, busy protection, valid mask limit, atomic draft, selection persistence and failed draft preservation")
     }

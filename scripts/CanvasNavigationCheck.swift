@@ -18,6 +18,8 @@ private final class CheckWindow: NSWindow {
         window.orderBack(nil)
         defer { view.stopMonitoring(); window.orderOut(nil) }
         var pans: [CGSize] = [], doubles = 0
+        var clippingToggles = 0
+        view.onToggleClipping = { clippingToggles += 1 }
         view.onPan = { pans.append($0) }; view.onDoubleClick = { _ in doubles += 1 }
         func mouseEvent(_ type: NSEvent.EventType, x: CGFloat = 300, y: CGFloat = 300, clicks: Int = 1, windowNumber: Int? = nil) -> NSEvent {
             NSEvent.mouseEvent(with: type, location: CGPoint(x: x, y: y), modifierFlags: [], timestamp: 0,
@@ -27,6 +29,13 @@ private final class CheckWindow: NSWindow {
             NSEvent.keyEvent(with: type, location: .zero, modifierFlags: [], timestamp: 0,
                 windowNumber: window.windowNumber, context: nil, characters: " ", charactersIgnoringModifiers: " ", isARepeat: false, keyCode: 49)!
         }
+        func clippingKey(modifiers: NSEvent.ModifierFlags = [], repeatKey: Bool = false, windowNumber: Int? = nil) -> NSEvent {
+            NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: modifiers, timestamp: 0,
+                windowNumber: windowNumber ?? window.windowNumber, context: nil, characters: "j", charactersIgnoringModifiers: "j", isARepeat: repeatKey, keyCode: 38)!
+        }
+        precondition(view.consume(clippingKey()) == nil && clippingToggles == 1)
+        precondition(view.consume(clippingKey(repeatKey: true)) == nil && clippingToggles == 1)
+        precondition(view.consume(clippingKey(modifiers: .command)) != nil)
         precondition(view.hitTest(CGPoint(x: 10, y: 10)) == nil, "Navigation must not cover edit handles")
         let down = mouseEvent(.leftMouseDown)
         let consumedDown = view.consume(down)
@@ -51,16 +60,19 @@ private final class CheckWindow: NSWindow {
         let text = NSTextView(frame: CGRect(x: 0, y: 0, width: 30, height: 30))
         host.addSubview(text); window.makeFirstResponder(text)
         precondition(view.consume(space(.keyDown)) != nil, "Typing a space must not enable panning")
+        precondition(view.consume(clippingKey()) != nil && clippingToggles == 1, "Typing j in a field must not toggle clipping")
         precondition(view.consume(mouseEvent(.leftMouseDown)) != nil)
         window.makeFirstResponder(nil)
         precondition(view.consume(mouseEvent(.leftMouseDown, x: -10)) != nil, "Events outside this canvas must pass through")
         let other = CheckWindow(contentRect: .zero, styleMask: .borderless, backing: .buffered, defer: false)
         precondition(view.consume(mouseEvent(.leftMouseDown, windowNumber: other.windowNumber)) != nil, "Other windows must remain unaffected")
+        precondition(view.consume(clippingKey(windowNumber: other.windowNumber)) != nil && clippingToggles == 1)
         precondition(view.consume(space(.keyDown)) == nil)
         NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
         precondition(view.consume(mouseEvent(.leftMouseDown)) != nil, "Losing focus must release the space modifier")
         view.enabled = false
         precondition(view.consume(space(.keyDown)) != nil)
+        precondition(view.consume(clippingKey()) != nil)
         precondition(pans.count == 1)
         print("PASS: canvas native drag, flipped coordinates, paired events, space/edit routing, text input, window isolation and focus reset")
     }

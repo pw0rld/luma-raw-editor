@@ -34,8 +34,17 @@ import LumaCore
         var settings = info.initial; settings.exposure = -0.2; settings.saturation = 0.9
         settings.localMasks = [LocalMask(exposure: 0.6, feather: 0.8)]
         var clock = Date()
-        _ = try await engine.preview(settings, profile: info.profile)
+        let preview = try await engine.preview(settings, profile: info.profile)
         let previewTime = Date().timeIntervalSince(clock)
+        clock = Date()
+        _ = try await engine.histogram(settings, profile: info.profile, matchingPreview: preview)
+        let histogramTime = Date().timeIntervalSince(clock)
+        clock = Date()
+        _ = try await engine.histogram(settings, profile: info.profile)
+        let cachedHistogramTime = Date().timeIntervalSince(clock)
+        clock = Date()
+        _ = try await engine.clippingOverlay(preview, options: .all)
+        let baseClippingTime = Date().timeIntervalSince(clock)
         let size = info.outputSize(for: settings), viewportSize = CGSize(width: 900, height: 600)
         var state = ViewportState()
         state.setPixelScale(1, at: CGPoint(x: 450, y: 300), imageSize: size, viewportSize: viewportSize, displayScale: 2)
@@ -46,6 +55,12 @@ import LumaCore
         clock = Date()
         for id in first.tiles { _ = try await engine.detailTile(settings, profile: info.profile, tile: id) }
         let nativeTime = Date().timeIntervalSince(clock)
+        clock = Date()
+        for id in first.tiles {
+            let tile = try await engine.detailTile(settings, profile: info.profile, tile: id)
+            _ = try await engine.clippingOverlay(tile.image, options: .all)
+        }
+        let nativeClippingTime = Date().timeIntervalSince(clock)
         clock = Date()
         for id in first.tiles { _ = try await engine.detailTile(settings, profile: info.profile, tile: id) }
         let cachedTime = Date().timeIntervalSince(clock)
@@ -60,6 +75,8 @@ import LumaCore
             "openSeconds": openTime, "basePreviewSeconds": previewTime, "firstNativeViewportSeconds": nativeTime,
             "cachedViewportSeconds": cachedTime, "fivePansSeconds": panTime, "firstViewportTiles": first.tiles.count,
             "cacheTiles": usage.tiles, "cacheBytes": usage.bytes]
-        print(String(data: try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys]), encoding: .utf8)!)
+        let diagnostics: [String: Any] = ["histogramSeconds": histogramTime, "cachedHistogramSeconds": cachedHistogramTime,
+            "baseClippingSeconds": baseClippingTime, "nativeViewportClippingSeconds": nativeClippingTime]
+        print(String(data: try JSONSerialization.data(withJSONObject: report.merging(diagnostics) { _, new in new }, options: [.prettyPrinted, .sortedKeys]), encoding: .utf8)!)
     }
 }

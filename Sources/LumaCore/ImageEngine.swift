@@ -31,6 +31,7 @@ public actor ImageEngine {
     private var detailRaw: CIRAWFilter?
     private var detailGraph: (settings: Adjustments, profile: RAWProfile?, image: CIImage)?
     private var detailTiles: [DetailTile] = []
+    private var histogramCache: [(settings: Adjustments, profile: RAWProfile?, value: OutputHistogram)] = []
     public static let detailCacheByteLimit = 48 * 1024 * 1024
     private let detailCacheLimit: Int
     private var detailCacheBytes = 0
@@ -103,6 +104,7 @@ public actor ImageEngine {
         // Commit only after a successful open, so a bad file doesn't destroy the current document.
         raw = nextRaw; bitmap = nextBitmap; properties = props; info = nextInfo
         detailRaw = nil; detailGraph = nil; detailTiles = []; detailCacheBytes = 0
+        histogramCache = []
         context.clearCaches()
         return nextInfo
     }
@@ -276,9 +278,29 @@ public actor ImageEngine {
     }
     public func preview(_ settings: Adjustments, profile: RAWProfile?, maxDimension: CGFloat = 1800) throws -> CGImage {
         let image = try processed(settings, profile: profile, maxDimension: maxDimension)
+        let opaque = image.composited(over: CIImage(color: .black).cropped(to: image.extent))
         try Task.checkCancellation()
-        guard let result = context.createCGImage(image, from: image.extent, format: .RGBA8, colorSpace: Self.outputSpace) else { throw EditorError.message("预览渲染失败。") }
+        guard let result = context.createCGImage(opaque, from: image.extent, format: .RGBA8, colorSpace: Self.outputSpace) else { throw EditorError.message("预览渲染失败。") }
         return result
+    }
+
+    /// Statistics always describe the entire final crop. A caller can reuse the
+    /// matching browse preview; crop/mask tools otherwise render the final crop.
+    /// Two small count tables cover original comparison and the current edit.
+    public func histogram(_ settings: Adjustments, profile: RAWProfile?, matchingPreview: CGImage? = nil) throws -> OutputHistogram {
+        try Task.checkCancellation(); try settings.validate()
+        guard info != nil else { throw EditorError.message("请先导入照片。") }
+        if let cached = histogramCache.first(where: { $0.settings == settings && $0.profile == profile }) { return cached.value }
+        let image = try matchingPreview ?? preview(settings, profile: profile)
+        let value = try OutputDiagnostics.histogram(image)
+        try Task.checkCancellation()
+        if histogramCache.count == 2 { histogramCache.removeFirst() }
+        histogramCache.append((settings, profile, value))
+        return value
+    }
+
+    public func clippingOverlay(_ image: CGImage, options: ClippingOptions) throws -> CGImage? {
+        try OutputDiagnostics.clippingOverlay(image, options: options)
     }
 
     /// Full-resolution processing precedes the viewport cut, preserving filter

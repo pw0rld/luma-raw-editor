@@ -40,6 +40,11 @@ struct CanvasRenderState: Equatable {
     @Published private(set) var referenceName: String?
     @Published var matchClusterCount = 3
     @Published var compare = false
+    @Published var showHighlightClipping = false
+    @Published var showShadowClipping = false
+    @Published private var histogramValue: OutputHistogram?
+    @Published private var histogramSource: CanvasRenderState?
+    @Published private var histogramFailure: (source: CanvasRenderState, message: String)?
     @Published var busy = false
     @Published var rendering = false
     @Published var status = "导入一张照片，开始显影"
@@ -60,6 +65,9 @@ struct CanvasRenderState: Equatable {
     private var renderedSettings: Adjustments?
     private var detailSmokeSource: CanvasRenderState?
     private var detailSmokeSummary: String?
+    private var detailSmokeTileCount = 0
+    private var clippingSmokeSource: CanvasRenderState?
+    private var clippingSmokeImages: Set<ObjectIdentifier> = []
     private let draftStore: DraftStore?
     private var draftTask: Task<Void, Never>?
     private var restoringDraft = false
@@ -91,6 +99,57 @@ struct CanvasRenderState: Equatable {
         }
         return CanvasRenderState(url: photo.url, sha256: photo.sha256, settings: state, profile: photo.profile, size: photo.outputSize(for: state))
     }
+    var clippingOptions: ClippingOptions {
+        var result: ClippingOptions = []
+        if showHighlightClipping { result.insert(.highlights) }
+        if showShadowClipping { result.insert(.shadows) }
+        return result
+    }
+    func toggleClipping() {
+        let enabled = clippingOptions.isEmpty
+        showHighlightClipping = enabled; showShadowClipping = enabled
+    }
+    /// Independent of viewport and tool: edited final crop, or the initial full
+    /// image when comparing. Never use an edit-tool full-frame preview as a crop.
+    var histogramRenderState: CanvasRenderState? {
+        guard let photo, canvasRenderState != nil else { return nil }
+        let state = compare ? photo.initial : settings
+        return CanvasRenderState(url: photo.url, sha256: photo.sha256, settings: state,
+            profile: photo.profile, size: photo.outputSize(for: state))
+    }
+    var histogram: OutputHistogram? { histogramSource == histogramRenderState ? histogramValue : nil }
+    var histogramError: String? { histogramFailure?.source == histogramRenderState ? histogramFailure?.message : nil }
+    func loadHistogram(_ source: CanvasRenderState?) async {
+        guard let source, source == histogramRenderState else { return }
+        if histogramSource == source, histogramValue != nil { return }
+        let renderer = engine
+        let matchingPreview = compare ? originalPreview : (renderedSettings == source.settings ? preview : nil)
+        do {
+            // Render interaction first; repeated edits cancel this pending work.
+            try await Task.sleep(nanoseconds: 200_000_000)
+            guard source == histogramRenderState else { return }
+            let result = try await renderer.histogram(source.settings, profile: source.profile, matchingPreview: matchingPreview)
+            try Task.checkCancellation()
+            guard source == histogramRenderState else { return }
+            histogramValue = result; histogramSource = source; histogramFailure = nil
+        } catch is CancellationError { }
+        catch { if source == histogramRenderState { histogramFailure = (source, error.localizedDescription) } }
+    }
+    func renderClipping(_ image: CGImage, source: CanvasRenderState, options: ClippingOptions) async throws -> CGImage? {
+        try Task.checkCancellation()
+        guard canvasRenderState == source, clippingOptions == options else { throw CancellationError() }
+        let renderer = engine
+        let overlay = try await renderer.clippingOverlay(image, options: options)
+        try Task.checkCancellation()
+        guard canvasRenderState == source, clippingOptions == options else { throw CancellationError() }
+        return overlay
+    }
+    func recordClippingSmoke(source: CanvasRenderState, image: CGImage) {
+        guard ProcessInfo.processInfo.environment["LUMA_SMOKE_CLIPPING"] != nil,
+              source == canvasRenderState, clippingOptions == .all else { return }
+        if clippingSmokeSource != source { clippingSmokeSource = source; clippingSmokeImages = [] }
+        clippingSmokeImages.insert(ObjectIdentifier(image))
+    }
     func renderDetail(_ tile: DetailTileID, source: CanvasRenderState) async throws -> DetailTile {
         try Task.checkCancellation()
         guard canvasRenderState == source else { throw CancellationError() }
@@ -105,6 +164,7 @@ struct CanvasRenderState: Equatable {
         guard let value = ProcessInfo.processInfo.environment["LUMA_SMOKE_DETAIL_SCALE"],
               let expected = Double(value), abs(Double(pixelScale) - expected) < 1e-9, canvasRenderState == source else { return }
         detailSmokeSource = source
+        detailSmokeTileCount = tiles
         detailSmokeSummary = "scale=\(pixelScale), backing=\(backing), tiles=\(tiles), size=\(source.size.width)x\(source.size.height)"
     }
     var masks: [LocalMask] { settings.localMasks }
@@ -347,6 +407,17 @@ struct CanvasRenderState: Equatable {
                     print(detailSmokeSource == canvasRenderState && detailSmokeSource != nil
                           ? "UI_SMOKE_DETAIL: \(detailSmokeSummary ?? "")"
                           : "UI_SMOKE_DETAIL: FAILED")
+                }
+                if ProcessInfo.processInfo.environment["LUMA_SMOKE_CLIPPING"] != nil {
+                    showHighlightClipping = true; showShadowClipping = true
+                    await loadHistogram(histogramRenderState)
+                    for _ in 0..<300 {
+                        if clippingSmokeSource == canvasRenderState, clippingSmokeImages.count >= detailSmokeTileCount + 1 { break }
+                        try? await Task.sleep(nanoseconds: 100_000_000)
+                    }
+                    if let histogram, clippingSmokeSource == canvasRenderState, clippingSmokeImages.count >= detailSmokeTileCount + 1 {
+                        print("UI_SMOKE_DIAGNOSTICS: samples=\(histogram.sampleCount), highlights=\(histogram.highlights), shadows=\(histogram.shadows), overlays=\(clippingSmokeImages.count)")
+                    } else { print("UI_SMOKE_DIAGNOSTICS: FAILED \(histogramError ?? "missing histogram or clipping overlays")") }
                 }
                 try? await Task.sleep(nanoseconds: 700_000_000)
                 if let view = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil })?.contentView,

@@ -61,6 +61,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 Button("一键追色", action: { model.applyColorMatch() }).keyboardShortcut("m", modifiers: [.command, .shift]).disabled(!model.canMatch)
                 Button("移除追色", action: model.clearColorMatch).disabled(model.settings.colorMatch == nil || model.busy)
             }
+            CommandMenu("查看") {
+                Button("切换高光与暗部提示", action: model.toggleClipping)
+                Toggle("高光溢出提示", isOn: $model.showHighlightClipping)
+                Toggle("暗部溢出提示", isOn: $model.showShadowClipping)
+            }
         }
     }
 }
@@ -124,6 +129,9 @@ struct EditorView: View {
         .alert("无法完成操作", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
             Button("好", role: .cancel) { model.error = nil }
         } message: { Text(model.error ?? "") }
+        .task(id: model.histogramRenderState, priority: .utility) {
+            await model.loadHistogram(model.histogramRenderState)
+        }
     }
     private var targetCanvas: some View {
         ZStack {
@@ -174,6 +182,8 @@ struct EditorView: View {
     private var inspector: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
+                ExposureDiagnosticsPanel(model: model)
+                Divider()
                 HStack { Text("显影").font(.title3.weight(.semibold)); Spacer(); Button("重置", action: model.reset).font(.caption) }
                 colorMatchControls
                 Divider()
@@ -423,6 +433,10 @@ private struct NavigablePhotoCanvas: View {
         if model.compare { return "原片显影" }
         return model.tool == .browse ? "调整后 · 成片构图" : "调整后 · 全图编辑"
     }
+    private func clippingRegion(in rect: CGRect) -> CGRect {
+        let crop: CropRect = model.compare || model.tool == .browse ? .full : model.cropRect
+        return OutputDiagnostics.overlayRegion(crop: crop, fullSize: imageSize, sourceRect: rect)
+    }
     private var detailStatus: String {
         if let message = detailError ?? planningError { return message }
         guard let request = detailRequest, request.source == detailSource else { return "预览中" }
@@ -459,7 +473,8 @@ private struct NavigablePhotoCanvas: View {
             GeometryReader { proxy in
                 let geometry = ViewportTransform(imageSize: imageSize, viewportSize: proxy.size, state: viewport, displayScale: displayScale)
                 ZStack(alignment: .topLeading) {
-                    Image(decorative: image, scale: 1).resizable()
+                    ClippedPhotoImage(model: model, image: image, source: model.canvasRenderState,
+                        region: clippingRegion(in: CGRect(origin: .zero, size: imageSize)))
                         .frame(width: geometry.imageRect.width, height: geometry.imageRect.height)
                         .position(x: geometry.imageRect.midX, y: geometry.imageRect.midY).allowsHitTesting(false)
                     detailLayer(geometry)
@@ -470,7 +485,7 @@ private struct NavigablePhotoCanvas: View {
                             .allowsHitTesting(model.tool == .crop && model.canEditCanvas)
                         if model.tool == .mask, let mask = model.selectedMask {
                             MaskOverlayPane(transform: geometry, mask: mask,
-                                            overlay: model.showMaskOverlay ? model.maskOverlayPreview : nil,
+                                            overlay: model.showMaskOverlay && model.clippingOptions.isEmpty ? model.maskOverlayPreview : nil,
                                             onChange: { model.setSelectedMask($0) }, onEditingChanged: model.gesture)
                                 .id(mask.id).allowsHitTesting(model.canEditCanvas)
                         }
@@ -486,7 +501,7 @@ private struct NavigablePhotoCanvas: View {
                     }, onDoubleClick: { point in
                         if viewport.pixelScale == 1 { viewport.fit() }
                         else { viewport.setPixelScale(1, at: point, imageSize: imageSize, viewportSize: proxy.size, displayScale: displayScale) }
-                    }, onDisplayScale: { nativeDisplayScale = $0 }))
+                    }, onDisplayScale: { nativeDisplayScale = $0 }, onToggleClipping: model.toggleClipping))
                 .onAppear { canvasSize = proxy.size; applySmokeScale() }
                 .onChange(of: proxy.size) { canvasSize = $0 }
             }.padding(16)
@@ -507,8 +522,8 @@ private struct NavigablePhotoCanvas: View {
                 ForEach(tiles.filter { request.plan.tiles.contains($0.id) }, id: \.id) { tile in
                     let rect = geometry.viewRect(for: CGRect(x: tile.sourceRect.minX / imageSize.width,
                         y: tile.sourceRect.minY / imageSize.height, width: tile.sourceRect.width / imageSize.width, height: tile.sourceRect.height / imageSize.height))
-                    Image(decorative: tile.image, scale: 1).resizable()
-                        .interpolation(geometry.pixelScale >= 1 ? .none : .high)
+                    ClippedPhotoImage(model: model, image: tile.image, source: request.source,
+                        interpolation: geometry.pixelScale >= 1 ? .none : .high, region: clippingRegion(in: tile.sourceRect))
                         .frame(width: rect.width, height: rect.height).position(x: rect.midX, y: rect.midY)
                 }
             }.frame(width: geometry.viewportSize.width, height: geometry.viewportSize.height, alignment: .topLeading)

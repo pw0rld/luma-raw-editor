@@ -25,6 +25,14 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
 @main struct CheckMain {
     static func main() async throws {
         setbuf(stdout, nil)
+        let diagnostics = OutputDiagnosticsTests()
+        if CommandLine.arguments.contains("--diagnostics-only") {
+            try diagnostics.testKnownBinsEndpointsAlphaAndLayouts()
+            try await diagnostics.testSamplingBoundsCropAlignmentAndCancellation()
+            try await diagnostics.testFinalCropPipelineAndRAW()
+            print("PASS: \(assertionCount) output diagnostics assertions")
+            return
+        }
         if CommandLine.arguments.contains("--detail-only") {
             let details = DetailPreviewTests()
             try await details.testNativeTilesMatchExportAndPreserveFineDetail()
@@ -56,6 +64,9 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
             print("PASS: \(assertionCount) non-render assertions; pixel rendering explicitly excluded")
             return
         }
+        try diagnostics.testKnownBinsEndpointsAlphaAndLayouts()
+        try await diagnostics.testSamplingBoundsCropAlignmentAndCancellation()
+        try await diagnostics.testFinalCropPipelineAndRAW()
         try await suite.testPipelineOrientationMetadataAndOriginalProtection()
         try await suite.testLocalMaskChangesOnlyMaskedRenderAndCanBeDisabled()
         try await suite.testRAWFixtureIfProvided()

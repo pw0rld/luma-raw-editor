@@ -11,12 +11,14 @@ struct CanvasNavigation: NSViewRepresentable {
     var onPan: (CGSize) -> Void
     var onDoubleClick: (CGPoint) -> Void
     var onDisplayScale: (CGFloat) -> Void = { _ in }
+    var onToggleClipping: () -> Void = {}
 
     func makeNSView(context: Context) -> CanvasNavigationView { CanvasNavigationView() }
     func updateNSView(_ view: CanvasNavigationView, context: Context) {
         view.enabled = enabled; view.dragToPan = dragToPan
         view.onZoom = onZoom; view.onPan = onPan; view.onDoubleClick = onDoubleClick
         view.onDisplayScale = onDisplayScale; view.reportDisplayScale()
+        view.onToggleClipping = onToggleClipping
         if !enabled { view.cancelNavigation() }
     }
     static func dismantleNSView(_ view: CanvasNavigationView, coordinator: ()) { view.stopMonitoring() }
@@ -29,6 +31,7 @@ final class CanvasNavigationView: NSView {
     var onPan: (CGSize) -> Void = { _ in }
     var onDoubleClick: (CGPoint) -> Void = { _ in }
     var onDisplayScale: (CGFloat) -> Void = { _ in }
+    var onToggleClipping: () -> Void = {}
     private var reportedScale: CGFloat?
     private var monitor: Any?
     private var windowObserver: NSObjectProtocol?
@@ -95,10 +98,15 @@ final class CanvasNavigationView: NSView {
             ? convert(window.mouseLocationOutsideOfEventStream, from: nil) : point
         guard bounds.contains(location), !isHiddenOrHasHiddenAncestor else { return event }
         let hasCommandModifier = !event.modifierFlags.intersection([.command, .control, .option]).isEmpty
+        let editingText = window.firstResponder is NSTextView || window.firstResponder is NSTextField
         switch event.type {
+        case .keyDown where event.charactersIgnoringModifiers?.lowercased() == "j":
+            guard !hasCommandModifier, !editingText else { return event }
+            if !event.isARepeat { onToggleClipping() }
+            return nil
         case .keyDown where event.keyCode == 49:
             // In particular, preserve spaces typed into file names or values.
-            guard !hasCommandModifier, !(window.firstResponder is NSTextView), !(window.firstResponder is NSTextField) else { return event }
+            guard !hasCommandModifier, !editingText else { return event }
             spaceHeld = true
             return nil
         case .leftMouseDown:

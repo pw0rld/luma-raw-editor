@@ -111,3 +111,33 @@ Source: scripts/DetailBench.swift, with separate create/run modes.
 Remaining hardware/data coverage: real-camera RAW sets, large RAW performance, macOS 13, Intel and physical non-Retina monitor migration.
 Final arm64 application signature and native-detail preview ZIP integrity: PASS.
 Native detail preview ZIP SHA-256: 6e640ea92a50f94a04d195ef1be802267baef51df387b3bdd5a39f3efae239f6.
+
+2026-10-27 — final-image histogram and endpoint overlays (local preview, unreleased)
+Complete build.sh --check in system graphics environment: PASS, 367 core assertions.
+State model, actual draft restore, native canvas input, folder and reference matching: PASS.
+Final UI-only refinements rebuilt and packaged; final StateModelCheck --render rerun: PASS.
+Known RGB/encoded-luma bins, exact endpoint counts, independent highlight/shadow switches: PASS.
+Transparent/half-transparent input, explicit black-composited preview/export, BGRA/padded rows and P3: PASS.
+Whole final crop after rotation, local masks and reference match vs 16-bit TIFF: PASS; synthetic DNG included.
+512-long-edge point-sampling bound, odd-size integer crop alignment, tile/crop intersection: PASS.
+Cancelled analysis/overlays, changed options, stale edit/photo and pending comparison switch: PASS.
+View-only switches and analysis preserve recipe/history; edit-tool full frame does not change final-crop statistics.
+J handled only over the current canvas; repeat, text input, command modifier, disabled canvas and other windows checked.
+Native Retina RGB 3072x2048 at 100%: six native tiles, seven overlays, clean screenshot/exit PASS.
+Same RGB Fit and 100% histogram: 174592 samples, 42212 highlight and 41077 shadow samples, identical.
+Final Fit UI: visible RGB plot, explicit checkbox states, histogram menu and red/blue overlays PASS.
+Native synthetic DNG + reference match at 100%: one tile, two overlays, 196608 samples, screenshot/exit PASS.
+UI checks used a separate bundle identifier and isolated draft paths, leaving the user's workspace intact.
+Output endpoint definition: any sRGB8 channel ==255 highlights; all RGB ==0 shadows.
+Histogram and percentages describe point-sampled final sRGB8 preview, not sensor RAW recovery.
+Native overlays classify displayed full-resolution tiles; Fit overlays classify the downscaled preview.
+24MP synthetic RGB standalone benchmark, M1 Max, one independent run without UI/parallel compilation:
+  Histogram on reused base 0.00523s; cached histogram 0.0000349s; base overlay 0.01361s.
+  Four native tile overlays 0.02928s; first native viewport 0.01509s; five pans 0.02204s.
+  Max resident set 231538688 bytes; system peak footprint 595035048 bytes.
+  Tile cache 42748160 bytes, excludes overlay images, RAW and Core Image/Metal allocations.
+These synthetic RGB measurements do not predict full UI/real-camera RAW latency, frame rate or memory.
+Final arm64 application signature and ZIP integrity: PASS.
+Preview ZIP: LumaRAW-histogram-preview-macos-arm64.zip
+ZIP SHA-256: 4323b11209a3fd1defac0743fc6b2bb59a538f0093a928c34fec1ef37e4c3706
+No release/version tag created. This feature's GitHub CI has not been run.
