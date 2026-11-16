@@ -50,6 +50,7 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
         viewport.testOverlayAndDragGeometryAtDifferentZooms()
         viewport.testResizeContinuityAndInvalidInput()
         try viewport.testNativeScaleRetinaAndTilePlans()
+        try viewport.testBudgetLimitedOverviewKeepsNativePixels()
         let stability = StabilityTests()
         try stability.testMaskAndCropRotationPreservesContent()
         stability.testLinearCoverageOpacityAndFeatherGeometry()

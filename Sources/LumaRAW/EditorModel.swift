@@ -39,7 +39,7 @@ struct CanvasRenderState: Equatable {
     @Published private(set) var referencePreview: CGImage?
     @Published private(set) var referenceName: String?
     @Published var matchClusterCount = 3
-    @Published var compare = false
+    @Published var compare = false { didSet { if compare != oldValue { finishGesture() } } }
     @Published var showHighlightClipping = false
     @Published var showShadowClipping = false
     @Published private var histogramValue: OutputHistogram?
@@ -61,6 +61,7 @@ struct CanvasRenderState: Equatable {
     private var previewTask: Task<Void, Never>?
     private var generation = 0
     private var gestureStart: Adjustments?
+    private var gestureOwner: UUID?
     private var savedSettings = Adjustments()
     private var renderedSettings: Adjustments?
     private var detailSmokeSource: CanvasRenderState?
@@ -226,7 +227,7 @@ struct CanvasRenderState: Equatable {
         finishGesture(); draftTask?.cancel()
         return await flushDraft() || confirmDiscard()
     }
-    private func finishGesture() { if gestureStart != nil { gesture(false) } }
+    private func finishGesture() { if gestureStart != nil { gesture(false, owner: gestureOwner) } }
     private func normalizeMaskSelection() {
         if selectedMask == nil { selectedMaskID = masks.first?.id }
     }
@@ -283,7 +284,7 @@ struct CanvasRenderState: Equatable {
     }
     @discardableResult func applyColorMatch() -> Task<Void, Never> {
         guard let photo, let referencePhoto, let referenceEngine, !busy else { return Task {} }
-        if gestureStart != nil { gesture(false) }
+        finishGesture()
         previewTask?.cancel(); generation += 1; rendering = false
         var sourceSettings = settings; sourceSettings.colorMatch = nil
         let clusters = min(5, max(1, matchClusterCount))
@@ -305,7 +306,7 @@ struct CanvasRenderState: Equatable {
     }
     func clearColorMatch() {
         guard settings.colorMatch != nil, !busy else { return }
-        if gestureStart != nil { gesture(false) }
+        finishGesture()
         let previous = settings; settings.colorMatch = nil
         history.record(from: previous, to: settings); schedulePreview()
         status = "已移除追色 · 可撤销"
@@ -347,7 +348,7 @@ struct CanvasRenderState: Equatable {
     }
     private func stashCurrent() {
         guard let photo else { return }
-        if gestureStart != nil { gesture(false) }
+        finishGesture()
         sessions[photo.url] = Session(sha256: photo.sha256, profile: photo.profile, settings: settings,
                                     saved: savedSettings, history: history, selectedMaskID: selectedMaskID)
     }
@@ -360,12 +361,14 @@ struct CanvasRenderState: Equatable {
         let url = inputURL.resolvingSymlinksInPath().standardizedFileURL
         if photo?.url == url { return Task {} }
         stashCurrent()
-        if !photos.contains(url) { photos.append(url) }
         previewTask?.cancel(); generation += 1; busy = true; status = "读取照片与校验原片…"
         return Task {
             do {
                 let candidate = ImageEngine()
                 let result = try await candidate.open(url)
+                if let session = sessions[url], session.sha256 != result.sha256 || session.profile != result.profile {
+                    throw EditorError.message("原片或 RAW 解码配置已改变，旧草稿已保留。请使用原片的正确版本，或另存副本作为新照片导入。")
+                }
                 let initialPreview = try await candidate.preview(result.initial, profile: result.profile)
                 var nextSettings = result.initial
                 if let session = sessions[url], session.sha256 == result.sha256, session.profile == result.profile {
@@ -373,6 +376,9 @@ struct CanvasRenderState: Equatable {
                 }
                 let nextPreview = nextSettings == result.initial ? initialPreview
                     : try await candidate.preview(nextSettings, profile: result.profile)
+                // The candidate is fully readable and compatible before it can
+                // change the list, active document or the next draft snapshot.
+                if !photos.contains(url) { photos.append(url) }
                 engine = candidate
                 photo = result; settings = result.initial; savedSettings = result.initial
                 history = EditHistory(); compare = false; selectedMaskID = nil; preview = nil; cropPreview = nil; originalPreview = nil
@@ -387,7 +393,14 @@ struct CanvasRenderState: Equatable {
                 normalizeMaskSelection()
                 preview = nextPreview; renderedSettings = settings; previewQuarterTurns = settings.quarterTurns
                 status = "\(result.isRAW ? "RAW" : "RGB") · \(result.width) × \(result.height) · \(result.backend)"
-            } catch { self.error = error.localizedDescription; status = "读取失败" }
+            } catch {
+                self.error = error.localizedDescription; status = "读取失败"
+                busy = false; rendering = false
+                // The old engine/document is still active. Resume cancelled
+                // pixel or mask-overlay work, even when its settings were equal.
+                schedulePreview()
+                return
+            }
             busy = false; rendering = false
             scheduleDraft()
             if let path = ProcessInfo.processInfo.environment["LUMA_SMOKE_SNAPSHOT"], preview != nil {
@@ -461,9 +474,19 @@ struct CanvasRenderState: Equatable {
         let previous = settings; settings.cropRect = .full
         history.record(from: previous, to: settings); schedulePreview()
     }
-    func gesture(_ editing: Bool) {
-        if editing { if !busy && gestureStart == nil { gestureStart = settings } }
-        else if let start = gestureStart { history.record(from: start, to: settings); gestureStart = nil; scheduleDraft() }
+    func gesture(_ editing: Bool) { gesture(editing, owner: nil) }
+    func gesture(_ editing: Bool, owner: UUID?) {
+        if editing {
+            guard !busy else { return }
+            if gestureStart != nil, gestureOwner != owner { finishGesture() }
+            if gestureStart == nil { gestureStart = settings; gestureOwner = owner }
+        } else {
+            // A disappearing old overlay must not close a newer overlay/slider's
+            // transaction after compare/tool switching has already ended it.
+            guard gestureOwner == owner, let start = gestureStart else { return }
+            history.record(from: start, to: settings)
+            gestureStart = nil; gestureOwner = nil; scheduleDraft()
+        }
     }
     func rotate() {
         guard photo != nil, !busy else { return }

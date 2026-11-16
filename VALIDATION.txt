@@ -141,3 +141,29 @@ Final arm64 application signature and ZIP integrity: PASS.
 Preview ZIP: LumaRAW-histogram-preview-macos-arm64.zip
 ZIP SHA-256: 4323b11209a3fd1defac0743fc6b2bb59a538f0093a928c34fec1ef37e4c3706
 No release/version tag created. This feature's GitHub CI has not been run.
+
+2026-11-16 — five review fixes (unreleased local development build)
+Baseline: 6babb8a plus this working-tree change; production sources compiled directly, no temporary source substitutes.
+Environment: macOS 26.5.2 (25F84), arm64; Apple Swift 6.3.3, macOS 13 deployment target.
+Project-local toolchain overlay/module cache used; system toolchain files unchanged.
+Swift 6.3.3 typechecking compatibility: PASS after splitting encoded-luma expression into typed intermediates.
+Complete scripts/build.sh --check: PASS, 390 core assertions plus all integration checks.
+DocumentRecoveryCheck: changed-source SHA rejected before active document/list commit; old recipe/history/selection retained after explicit draft flush and startup restore.
+Original source bytes restored: old adjustments/history/selection recovered successfully.
+Same-SHA but incompatible RAW baseline profile: rejected; old draft entry preserved.
+Missing/corrupt imports: no new invalid list entries; current settings/history preserved; pending preview, detail, histogram and selected-mask overlay recovered.
+Compare switch closes crop/mask gesture; old owner cannot close a new owner or ordinary slider; duplicate endings do not duplicate undo.
+OverlayLifecycleCheck: actual native SwiftUI crop/mask drags, overlay removed mid-drag, one end callback per owner, late mouse-up does not repeat it: PASS.
+Test windows remain off-screen, do not move pointer or acquire user key focus.
+Large overview: 9600x6400 image, 6000x4000 physical-pixel canvas at 62.5%, fallback from 70 native tiles to 20 divisor-2 tiles: PASS.
+1x/2x backing math, coverage, overlap, panning, nonlimited ordinary overview and native 100% no downsampling: PASS.
+Budget-limited overview explicitly labeled; >=100% excessive viewport retains error rather than silently lowering resolution.
+Existing pixel rendering, recipe migration, RAW/export/detail, native canvas input, folder and reference integration: PASS.
+Final isolated UI smoke: synthetic DNG + reference match + histogram/clipping + 100% native tile: PASS.
+UI backing=1.0, one native tile, two overlays, 196608 histogram samples; screenshot and clean exit PASS.
+Application deep/strict signature verification and arm64 architecture: PASS.
+ZIP integrity: PASS.
+Preview: LumaRAW-review-fixes-2026-11-16-macos-arm64.zip
+ZIP SHA-256: db5b82ef141aba5f8ad50b091361ab4871b86777291b384cef807305e9117262
+App remains 0.4.0/build 4; no release/version tag created; these working-tree changes have not run on GitHub CI.
+Remaining: real-camera RAW peak memory/latency, physical large-screen overview performance, macOS 13 and Intel hardware acceptance.

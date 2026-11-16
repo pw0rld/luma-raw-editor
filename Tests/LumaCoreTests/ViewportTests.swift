@@ -133,4 +133,47 @@ final class ViewportTests: XCTestCase {
         native.setPixelScale(1, at: .zero, imageSize: regular, viewportSize: canvas, displayScale: 2)
         XCTAssertTrue(DetailPlan.needsTiles(transform: ViewportTransform(imageSize: regular, viewportSize: canvas, state: native, displayScale: 2), previewSize: CGSize(width: 1800, height: 1200)))
     }
+
+    func testBudgetLimitedOverviewKeepsNativePixels() throws {
+        let image = CGSize(width: 9600, height: 6400)
+        for backing: CGFloat in [1, 2] {
+            let canvas = CGSize(width: 6000 / backing, height: 4000 / backing)
+            let fit = ViewportTransform(imageSize: image, viewportSize: canvas, displayScale: backing)
+            XCTAssertEqual(fit.pixelScale, 0.625)
+            let overview = try DetailPlan(transform: fit)
+            XCTAssertTrue(overview.isBudgetLimited)
+            XCTAssertEqual(overview.tiles.count, 20)
+            XCTAssertTrue(overview.tiles.allSatisfy { $0.divisor == 2 })
+            XCTAssertEqual(overview.tiles.first, DetailTileID(divisor: 2, x: 2, y: 1))
+            let regions = try overview.tiles.map { tile -> CGRect in
+                let rect = try DetailPlan.renderRect(for: tile, fullSize: image)
+                return CGRect(x: rect.minX * 2, y: rect.minY * 2, width: rect.width * 2, height: rect.height * 2)
+            }
+            let fractions: [CGFloat] = [0.0001, 0.25, 0.5, 0.75, 0.9999]
+            let points = fractions.flatMap { y in fractions.map { x in CGPoint(x: image.width * x, y: image.height * y) } }
+            XCTAssertTrue(points.allSatisfy { point in regions.contains { $0.contains(point) } })
+            let left = try DetailPlan.renderRect(for: DetailTileID(divisor: 2, x: 0, y: 0), fullSize: image)
+            let right = try DetailPlan.renderRect(for: DetailTileID(divisor: 2, x: 1, y: 0), fullSize: image)
+            XCTAssertEqual(left.intersection(right).width, 4)
+
+            var state = ViewportState()
+            state.setPixelScale(1, at: CGPoint(x: canvas.width / 2, y: canvas.height / 2), imageSize: image, viewportSize: canvas, displayScale: backing)
+            let native = try DetailPlan(transform: ViewportTransform(imageSize: image, viewportSize: canvas, state: state, displayScale: backing))
+            XCTAssertFalse(native.isBudgetLimited)
+            XCTAssertTrue(native.tiles.allSatisfy { $0.divisor == 1 })
+            state.setPixelScale(0.625, at: .zero, imageSize: image, viewportSize: canvas, displayScale: backing)
+            state.pan(by: CGSize(width: -canvas.width / 4, height: -canvas.height / 4), imageSize: image, viewportSize: canvas, displayScale: backing)
+            let panned = try DetailPlan(transform: ViewportTransform(imageSize: image, viewportSize: canvas, state: state, displayScale: backing))
+            XCTAssertTrue(panned.tiles.count <= DetailPlan.maximumTiles)
+        }
+        let ordinary = try DetailPlan(transform: ViewportTransform(imageSize: image, viewportSize: CGSize(width: 1200, height: 800), displayScale: 2))
+        XCTAssertFalse(ordinary.isBudgetLimited)
+        let huge = CGSize(width: 50000, height: 50000), canvas = CGSize(width: 20000, height: 20000)
+        var state = ViewportState()
+        state.setPixelScale(0.8, at: CGPoint(x: 10000, y: 10000), imageSize: huge, viewportSize: canvas)
+        let reduced = try DetailPlan(transform: ViewportTransform(imageSize: huge, viewportSize: canvas, state: state))
+        XCTAssertTrue(reduced.isBudgetLimited && reduced.tiles.count <= DetailPlan.maximumTiles)
+        state.setPixelScale(1, at: CGPoint(x: 10000, y: 10000), imageSize: huge, viewportSize: canvas)
+        XCTAssertThrowsError(try DetailPlan(transform: ViewportTransform(imageSize: huge, viewportSize: canvas, state: state)))
+    }
 }

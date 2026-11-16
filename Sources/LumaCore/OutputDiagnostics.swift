@@ -86,7 +86,9 @@ public enum OutputDiagnostics {
                 let index = (sourceY * image.width + sourceX) * 4
                 let r = Int(bytes[index]), g = Int(bytes[index + 1]), b = Int(bytes[index + 2])
                 red[r] += 1; green[g] += 1; blue[b] += 1
-                luma[Int((0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(b)).rounded())] += 1
+                let weighted: Double = 0.2126 * Double(r) + 0.7152 * Double(g) + 0.0722 * Double(b)
+                let lumaIndex = Int(weighted.rounded())
+                luma[lumaIndex] += 1
                 if r == 255 || g == 255 || b == 255 { highlights += 1 }
                 if r == 0 && g == 0 && b == 0 { shadows += 1 }
             }

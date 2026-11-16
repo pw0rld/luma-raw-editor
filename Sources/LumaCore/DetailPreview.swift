@@ -20,6 +20,7 @@ public struct DetailPlan: Equatable {
     public static let maximumTiles = 64
     public let imageSize: CGSize
     public let tiles: [DetailTileID]
+    public let isBudgetLimited: Bool
 
     public static func needsTiles(transform: ViewportTransform, previewSize: CGSize) -> Bool {
         transform.pixelScale >= 1 || transform.imageRect.width * transform.displayScale > previewSize.width + 0.01
@@ -33,17 +34,28 @@ public struct DetailPlan: Equatable {
             throw EditorError.message("细节预览的范围无效。")
         }
         // Never undersample the display. At 100% and above this is always 1.
-        let level = max(0, min(16, Int(floor(log2(1 / max(1e-9, min(1, transform.pixelScale)))))))
+        let preferredLevel = max(0, min(16, Int(floor(log2(1 / max(1e-9, min(1, transform.pixelScale)))))))
+        var level = preferredLevel
+        func ranges(at level: Int) -> (left: Int, right: Int, top: Int, bottom: Int) {
+            let side = CGFloat(Self.tileSide * (1 << level))
+            return (max(0, Int(floor(visible.minX / side))), Int(ceil(visible.maxX / side)),
+                    max(0, Int(floor(visible.minY / side))), Int(ceil(visible.maxY / side)))
+        }
+        var grid = ranges(at: level)
+        while (grid.right - grid.left) * (grid.bottom - grid.top) > Self.maximumTiles {
+            // A zoomed-out overview can trade sampling density for a bounded
+            // plan. Native 100% and larger must retain one source pixel/sample.
+            guard transform.pixelScale < 1, level < 16 else {
+                throw EditorError.message("当前细节视口过大，请缩小窗口后重试。")
+            }
+            level += 1; grid = ranges(at: level)
+        }
+        isBudgetLimited = level > preferredLevel
         let divisor = 1 << level
         let side = CGFloat(Self.tileSide * divisor)
-        let left = max(0, Int(floor(visible.minX / side))), right = Int(ceil(visible.maxX / side))
-        let top = max(0, Int(floor(visible.minY / side))), bottom = Int(ceil(visible.maxY / side))
-        guard (right - left) * (bottom - top) <= Self.maximumTiles else {
-            throw EditorError.message("当前细节视口过大，请缩小窗口后重试。")
-        }
         let center = CGPoint(x: visible.midX / side, y: visible.midY / side)
         var ids: [DetailTileID] = []
-        for y in top..<bottom { for x in left..<right { ids.append(DetailTileID(divisor: divisor, x: x, y: y)) } }
+        for y in grid.top..<grid.bottom { for x in grid.left..<grid.right { ids.append(DetailTileID(divisor: divisor, x: x, y: y)) } }
         // Resolve the area under the user's gaze first.
         tiles = ids.sorted {
             let a = hypot(CGFloat($0.x) + 0.5 - center.x, CGFloat($0.y) + 0.5 - center.y)

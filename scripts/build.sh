@@ -59,6 +59,14 @@ if [[ "${1:-}" == "--check" || "${1:-}" == "--check-model" ]]; then
         exit 0
     fi
     "$BUILD/StateModelCheck" "$ROOT/Samples" --render
+    xcrun swiftc "${FLAGS[@]}" -parse-as-library -I "$BUILD" -L "$BUILD" -lLumaCore \
+        "$ROOT/Sources/LumaRAW/EditorModel.swift" "$ROOT/scripts/DocumentRecoveryCheck.swift" \
+        -o "$BUILD/DocumentRecoveryCheck" -Xlinker -rpath -Xlinker @executable_path
+    "$BUILD/DocumentRecoveryCheck" "$ROOT/Samples"
+    xcrun swiftc "${FLAGS[@]}" -parse-as-library -I "$BUILD" -L "$BUILD" -lLumaCore \
+        "$ROOT/Sources/LumaRAW/EditingOverlays.swift" "$ROOT/scripts/OverlayLifecycleCheck.swift" \
+        -o "$BUILD/OverlayLifecycleCheck" -Xlinker -rpath -Xlinker @executable_path
+    "$BUILD/OverlayLifecycleCheck"
     xcrun swiftc "${FLAGS[@]}" -parse-as-library \
         "$ROOT/Sources/LumaRAW/CanvasNavigation.swift" "$ROOT/scripts/CanvasNavigationCheck.swift" \
         -o "$BUILD/CanvasNavigationCheck"
