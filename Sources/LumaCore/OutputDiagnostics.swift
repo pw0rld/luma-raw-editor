@@ -12,7 +12,7 @@ public struct ClippingOptions: OptionSet, Equatable, Sendable {
 
 /// Counts point-sampled from the entire final, black-composited sRGB preview.
 /// Luma is weighted *encoded* RGB, not scene-linear luminance.
-public struct OutputHistogram: Equatable {
+public struct OutputHistogram: Equatable, Sendable {
     public let red: [Int]
     public let green: [Int]
     public let blue: [Int]
@@ -26,6 +26,21 @@ public struct OutputHistogram: Equatable {
     public var sampleCount: Int { sampleWidth * sampleHeight }
     public var highlightFraction: Double { Double(highlights) / Double(sampleCount) }
     public var shadowFraction: Double { Double(shadows) / Double(sampleCount) }
+}
+
+// Histogram and overlay requests share one CPU worker. The synchronous actor
+// methods hold their slot through the conversion and scan, and the caller's
+// cancellation state is checked before allocation and during the scan.
+actor OutputDiagnosticsWorker {
+    static let shared = OutputDiagnosticsWorker()
+
+    func histogram(_ image: CGImage) throws -> OutputHistogram {
+        try OutputDiagnostics.histogram(image)
+    }
+
+    func clippingOverlay(_ image: CGImage, options: ClippingOptions) throws -> CGImage? {
+        try OutputDiagnostics.clippingOverlay(image, options: options)
+    }
 }
 
 public enum OutputDiagnostics {
@@ -125,5 +140,10 @@ public enum OutputDiagnostics {
             throw EditorError.message("溢出提示生成失败。")
         }
         return result
+    }
+
+    /// Uses the shared CPU worker for interactive preview or tile requests.
+    public static func renderClippingOverlay(_ image: CGImage, options: ClippingOptions) async throws -> CGImage? {
+        try await OutputDiagnosticsWorker.shared.clippingOverlay(image, options: options)
     }
 }

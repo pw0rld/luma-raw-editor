@@ -99,6 +99,46 @@ final class DetailPreviewTests: XCTestCase {
         do { _ = try await task.value; XCTFail("Cancelled detail task completed") } catch is CancellationError { }
     }
 
+    func testOddSampledGridKeepsTopLeftPhaseAndOpaqueEdges() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        func bands(width: Int, height: Int) throws -> URL {
+            let canvas = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                   space: ImageEngine.outputSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+            for row in 0..<height {
+                let gray = CGFloat((row / 4).isMultiple(of: 2) ? 0.82 : 0.27)
+                canvas.setFillColor(CGColor(red: gray, green: gray, blue: gray, alpha: 1))
+                canvas.fill(CGRect(x: 0, y: height - 1 - row, width: width, height: 1))
+            }
+            let url = folder.appendingPathComponent("\(width)x\(height).png")
+            let destination = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)!
+            CGImageDestinationAddImage(destination, canvas.makeImage()!, nil)
+            XCTAssertTrue(CGImageDestinationFinalize(destination))
+            return url
+        }
+        let odd = ImageEngine(), aligned = ImageEngine()
+        let oddInfo = try await odd.open(bands(width: 65, height: 65))
+        let alignedInfo = try await aligned.open(bands(width: 72, height: 72))
+        for divisor in [2, 4, 8] {
+            let id = DetailTileID(divisor: divisor, x: 0, y: 0)
+            let actual = try await odd.detailTile(oddInfo.initial, profile: nil, tile: id)
+            let reference = try await aligned.detailTile(alignedInfo.initial, profile: nil, tile: id)
+            let width = (65 + divisor - 1) / divisor
+            XCTAssertEqual(actual.image.width, width)
+            XCTAssertEqual(actual.image.height, width)
+            XCTAssertEqual(actual.sourceRect.size, CGSize(width: width * divisor, height: width * divisor))
+            let bytes = rgba(actual.image), alignedBytes = rgba(reference.image)
+            XCTAssertTrue(stride(from: 3, to: bytes.count, by: 4).allSatisfy { bytes[$0] == 255 })
+            for row in 0..<4 {
+                let pixel = (row * width + 4) * 4, expected = (row * reference.image.width + 4) * 4
+                XCTAssertLessThan(abs(Int(bytes[pixel]) - Int(alignedBytes[expected])), 2)
+                XCTAssertLessThan(abs(Int(bytes[row * width * 4]) - Int(bytes[pixel])), 2)
+                XCTAssertLessThan(abs(Int(bytes[(row * width + width - 1) * 4]) - Int(bytes[pixel])), 2)
+            }
+        }
+    }
+
     func testSampledTileEdgesAndRAWDetail() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)

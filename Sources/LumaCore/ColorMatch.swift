@@ -45,6 +45,11 @@ public struct ColorCluster: Codable, Equatable {
 }
 
 public struct MatchAnalysis: Equatable {
+    private struct ChromaCell: Hashable {
+        let a: Int
+        let b: Int
+    }
+
     public let clusters: [ColorCluster]
     public let lightnessSamples: [Double]
     public init(clusters: [ColorCluster], lightnessSamples: [Double]) {
@@ -52,24 +57,70 @@ public struct MatchAnalysis: Equatable {
     }
     public static func analyze(_ samples: [LabColor], clusterCount: Int) throws -> MatchAnalysis {
         guard (1...5).contains(clusterCount) else { throw EditorError.message("颜色分组应为 1 到 5。") }
-        let points = samples.filter { $0.lightness.isFinite && $0.a.isFinite && $0.b.isFinite &&
+        let validSamples = samples.filter { $0.lightness.isFinite && $0.a.isFinite && $0.b.isFinite &&
             (-400...400).contains($0.a) && (-400...400).contains($0.b) }
-        guard points.count >= 32 else { throw EditorError.message("有效像素太少，无法分析追色。") }
+        guard validSamples.count >= 32 else { throw EditorError.message("有效像素太少，无法分析追色。") }
         try Task.checkCancellation()
         func distance(_ p: LabColor, _ q: LabColor) -> Double {
             let a = p.a - q.a, b = p.b - q.b; return a * a + b * b
         }
-        // Deterministic farthest-point initialization; flat images naturally use fewer groups.
+        // Count neighboring chroma bins together so a small accent can span
+        // several shades while distant defects cannot claim an initial center.
+        // A group needs at least two samples and 0.5% of the valid pixels.
+        let minimumPopulation = max(2, (validSamples.count + 199) / 200)
+        let cells = validSamples.map { ChromaCell(a: Int(floor($0.a / 4)), b: Int(floor($0.b / 4))) }
+        var populationByCell: [ChromaCell: Int] = [:]
+        for cell in cells { populationByCell[cell, default: 0] += 1 }
+        var remainingCells = Set(populationByCell.keys)
+        var supportedCells: [ChromaCell: (anchor: ChromaCell, population: Int)] = [:]
+        while let start = remainingCells.popFirst() {
+            var component = [start]
+            var population = 0
+            var index = 0
+            while index < component.count {
+                let cell = component[index]
+                population += populationByCell[cell, default: 0]
+                for a in (cell.a - 1)...(cell.a + 1) {
+                    for b in (cell.b - 1)...(cell.b + 1) {
+                        let neighbor = ChromaCell(a: a, b: b)
+                        if remainingCells.remove(neighbor) != nil { component.append(neighbor) }
+                    }
+                }
+                index += 1
+            }
+            if population >= minimumPopulation {
+                for cell in component { supportedCells[cell] = (start, population) }
+            }
+        }
+        var supported: [LabColor] = [], supportedSeeds: [LabColor] = []
+        var seededSmallComponents = Set<ChromaCell>()
+        for (point, cell) in zip(validSamples, cells) {
+            guard let component = supportedCells[cell] else { continue }
+            supported.append(point)
+            // A color region too small for two valid groups gets one seed
+            // candidate, even when its shades span a wide chroma range.
+            if component.population >= 2 * minimumPopulation || seededSmallComponents.insert(component.anchor).inserted {
+                supportedSeeds.append(point)
+            }
+        }
+        // Trim isolated chroma only when nearly all samples have support.
+        // Broad or diffuse palettes keep their wider chroma distribution.
+        let points = supported.count * 20 >= validSamples.count * 19 ? supported : validSamples
+        let hasRepresentativeCoverage = supported.count * 2 >= validSamples.count
+        let seeds = hasRepresentativeCoverage ? supportedSeeds : points
+        let seedPopulation = hasRepresentativeCoverage ? supported : points
+        try Task.checkCancellation()
         let mean = LabColor(lightness: 0,
-                            a: points.reduce(0) { $0 + $1.a } / Double(points.count),
-                            b: points.reduce(0) { $0 + $1.b } / Double(points.count))
-        var centers = [points.min(by: { distance($0, mean) < distance($1, mean) })!]
-        var nearest = points.map { distance($0, centers[0]) }
+                            a: seedPopulation.reduce(0) { $0 + $1.a } / Double(seedPopulation.count),
+                            b: seedPopulation.reduce(0) { $0 + $1.b } / Double(seedPopulation.count))
+        var centers = [seeds.min(by: { distance($0, mean) < distance($1, mean) })!]
+        var nearest = seeds.map { distance($0, centers[0]) }
         while centers.count < clusterCount {
             let index = nearest.indices.max(by: { nearest[$0] < nearest[$1] })!
             guard nearest[index] > 0.04 else { break }
-            centers.append(points[index])
-            for i in points.indices { nearest[i] = min(nearest[i], distance(points[i], points[index])) }
+            let seed = seeds[index]
+            centers.append(seed)
+            for i in seeds.indices { nearest[i] = min(nearest[i], distance(seeds[i], seed)) }
         }
         var assignments = [Int](repeating: 0, count: points.count)
         for _ in 0..<32 {
@@ -104,19 +155,21 @@ public struct MatchAnalysis: Equatable {
             let k = assignments[i], count = Double(counts[k])
             varA[k] += pow(point.a - sumA[k] / count, 2); varB[k] += pow(point.b - sumB[k] / count, 2)
         }
-        let clusters = centers.indices.compactMap { k -> ColorCluster? in
-            guard counts[k] > 0 else { return nil }
+        let retained = centers.indices.filter { counts[$0] >= minimumPopulation }
+        let retainedPopulation = Double(retained.reduce(0) { $0 + counts[$1] })
+        let clusters = retained.map { k in
             let n = Double(counts[k])
             return ColorCluster(meanA: sumA[k] / n, meanB: sumB[k] / n,
                                 meanL: min(100, max(0, sumL[k] / n)),
                                 stdA: max(1.5, sqrt(varA[k] / n)), stdB: max(1.5, sqrt(varB[k] / n)),
-                                weight: n / Double(points.count))
+                                weight: n / retainedPopulation)
         }.sorted { lhs, rhs in
             if lhs.weight != rhs.weight { return lhs.weight > rhs.weight }
             if lhs.meanA != rhs.meanA { return lhs.meanA < rhs.meanA }
             return lhs.meanB < rhs.meanB
         }
-        return MatchAnalysis(clusters: clusters, lightnessSamples: points.map { min(100, max(0, $0.lightness)) }.sorted())
+        return MatchAnalysis(clusters: clusters,
+            lightnessSamples: validSamples.map { min(100, max(0, $0.lightness)) }.sorted())
     }
 }
 

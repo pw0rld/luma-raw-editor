@@ -54,14 +54,15 @@ final class StabilityTests: XCTestCase {
         XCTAssertTrue(hard > soft)
     }
 
-    func testV3RecipeAndV2Migration() throws {
+    func testCurrentRecipeAndV2Migration() throws {
         var settings = Adjustments(); settings.localMasks = [LocalMask(kind: .linear, exposure: 1)]
         let recipe = Recipe(sourceName: "source.jpg", sourceSHA256: String(repeating: "a", count: 64), rawProfile: nil, adjustments: settings)
-        XCTAssertEqual(recipe.version, 3); XCTAssertEqual(recipe.pipeline, "luma-sdr-p3-v3")
+        XCTAssertEqual(recipe.version, Recipe.currentVersion)
+        XCTAssertEqual(recipe.pipeline, Recipe.currentPipeline)
         var json = try JSONSerialization.jsonObject(with: recipe.encoded()) as! [String: Any]
         json["version"] = 2; json["pipeline"] = "luma-sdr-p3-v2"
         let migrated = try Recipe.decode(JSONSerialization.data(withJSONObject: json))
-        XCTAssertEqual(migrated.version, 3)
+        XCTAssertEqual(migrated.version, Recipe.currentVersion)
         XCTAssertTrue(migrated.adjustments.localMasks[0].legacyLinearFalloff)
         XCTAssertFalse(recipe.adjustments.localMasks[0].legacyLinearFalloff)
         var invalid = settings; invalid.localMasks.append(settings.localMasks[0])
@@ -86,7 +87,8 @@ final class StabilityTests: XCTestCase {
     func testAtomicDraftRoundTripAndCorruptRejection() async throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: directory) }
-        let store = DraftStore(url: directory.appendingPathComponent("nested/workspace.json"))
+        let draftURL = directory.appendingPathComponent("nested/workspace.json")
+        let store = DraftStore(url: draftURL)
         let initial = try await store.load(); XCTAssertNil(initial)
         var settings = Adjustments(); settings.localMasks = [LocalMask(exposure: 1)]
         let recipe = Recipe(sourceName: "source.jpg", sourceSHA256: String(repeating: "a", count: 64), rawProfile: nil, adjustments: settings)
@@ -104,7 +106,50 @@ final class StabilityTests: XCTestCase {
         do { try await store.save(invalid); XCTFail("Invalid draft accepted") } catch { }
         let afterFailure = try await store.load()
         XCTAssertEqual(afterFailure?.entries[0].recipe, recipe)
-        try Data("corrupt".utf8).write(to: directory.appendingPathComponent("nested/workspace.json"))
+
+        var legacy = draft
+        legacy.entries[0].recipe.version = 2
+        legacy.entries[0].recipe.pipeline = "luma-sdr-p3-v2"
+        legacy.entries[0].recipe.adjustments.localMasks[0].kind = .linear
+        let rawURL = directory.appendingPathComponent("source.dng")
+        let rawProfile = RAWProfile(decoderVersion: "test", values: [
+            "baselineExposure": 0, "shadowBias": 0, "boostAmount": 1, "boostShadowAmount": 0
+        ], lensCorrection: false)
+        var rawSettings = settings
+        rawSettings.temperature = 5200
+        rawSettings.legacyWhiteBalance = true
+        rawSettings.localMasks[0].tintDelta = 12
+        rawSettings.localMasks[0].legacyWhiteBalance = true
+        var editedRAW = rawSettings
+        editedRAW.exposure = 1
+        var rawHistory = EditHistory()
+        rawHistory.record(from: rawSettings, to: editedRAW)
+        rawHistory.record(from: editedRAW, to: rawSettings)
+        _ = rawHistory.undo(current: rawSettings)
+        var rawRecipe = Recipe(sourceName: "source.dng", sourceSHA256: recipe.sourceSHA256,
+            rawProfile: rawProfile, adjustments: rawSettings)
+        rawRecipe.version = 3
+        rawRecipe.pipeline = "luma-sdr-p3-v3"
+        legacy.photos.append(rawURL)
+        legacy.entries.append(DraftEntry(sourceURL: rawURL, recipe: rawRecipe, saved: rawSettings,
+            history: rawHistory, selectedMaskID: nil))
+
+        try JSONEncoder().encode(legacy).write(to: draftURL)
+        let migrated = try await store.load()
+        XCTAssertEqual(migrated?.entries[0].recipe.version, Recipe.currentVersion)
+        XCTAssertEqual(migrated?.entries[0].recipe.adjustments.localMasks[0].legacyLinearFalloff, true)
+        XCTAssertEqual(migrated?.entries[0].history.undoStack, history.undoStack)
+        guard let raw = migrated?.entries.first(where: { $0.sourceURL == rawURL }) else {
+            XCTFail("Missing migrated RAW draft")
+            return
+        }
+        rawSettings.legacyWhiteBalance = false
+        XCTAssertEqual(raw.recipe.adjustments, rawSettings)
+        XCTAssertEqual(raw.saved, rawSettings)
+        XCTAssertEqual(raw.history.undoStack, [rawSettings])
+        XCTAssertEqual(raw.history.redoStack, [rawSettings])
+
+        try Data("corrupt".utf8).write(to: draftURL)
         do { _ = try await store.load(); XCTFail("Corrupt draft accepted") } catch { }
     }
 }

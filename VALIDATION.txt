@@ -167,3 +167,21 @@ Preview: LumaRAW-review-fixes-2026-11-16-macos-arm64.zip
 ZIP SHA-256: db5b82ef141aba5f8ad50b091361ab4871b86777291b384cef807305e9117262
 App remains 0.4.0/build 4; no release/version tag created; these working-tree changes have not run on GitHub CI.
 Remaining: real-camera RAW peak memory/latency, physical large-screen overview performance, macOS 13 and Intel hardware acceptance.
+
+2026-11-20 — white balance, sampled tiles, diagnostics and recovery (local development build)
+Baseline: 7382512 plus this working-tree change. macOS 26.5.2, Apple M1 Max, Apple Swift 6.3.3.
+Complete scripts/build.sh --check with bundled synthetic Bayer DNG: PASS (481 core assertions and all integration checks).
+White balance: signed temperature and tint tested separately on RGB, masks and synthetic DNG. V3 recipe replay, legacy slider edits, explicit conversion and undo/redo passed.
+Draft migration: v2 linear falloff, old RAW and mask white-balance flags, undo/redo, and atomic failure preservation passed.
+1,000 synthetic draft entries, median of nine runs: per-recipe JSON round trip 50.72 ms, in-memory migration and validation 2.16 ms. Disk I/O was outside the measurement.
+Sampled detail: odd image dimensions checked at divisors 2, 4 and 8 for aligned phase, opaque edges and unchanged sample spacing. On the 4× band probe, top-row byte values were previously 55 and 200 at heights 65 and 68. Both now match their native value of 214.
+Native 100% tile versus 16-bit TIFF: maximum mean byte error among checked tiles 0.000945.
+Canvas: double-click owns the matching drag/up, including outside the canvas. Shift+J passes through. Native crop and mask cancellation and event routing also passed.
+Diagnostics: shared serial CPU worker, cancelled requests, stale image/settings/options rejection and exact endpoint pixels passed.
+Document recovery: successful rename/move, wrong SHA, same-SHA incompatible RAW profile, path collision, cancellation and restart passed. The recovery check calls the model directly for file selection and cancellation.
+Color matching: three coherent clusters survive a single extreme sample, a broad 0.8% accent remains represented, and existing embedded matches replay. RGB and synthetic RAW rendered successfully.
+Isolated native UI smoke: synthetic DNG and reference match, 100% detail at 2× backing, one native tile, 196608 histogram samples, two clipping overlays, window capture and clean exit passed.
+Application deep/strict signature, arm64 architecture and ZIP integrity: PASS.
+Preview: LumaRAW-review-fixes-2026-11-20-macos-arm64.zip
+ZIP SHA-256: 184e1a93d6bfd8bff2bf123b5c0ba399fe41ae14894def4df7b5d8821054e762
+Remaining: real-camera RAW latency and peak memory measurements before choosing broader optimization. Metal migration is tracked separately.

@@ -48,6 +48,43 @@ final class ColorMatchTests: XCTestCase {
         XCTAssertThrowsError(try MatchAnalysis.analyze(Array(repeating: LabColor(lightness: .nan, a: 0, b: 0), count: 64), clusterCount: 1))
     }
 
+    func testOutlierResistantAnalysisKeepsSparseAccent() throws {
+        let hues: [Double] = [-18, 0, 18]
+        func palette(_ count: Int) -> [LabColor] {
+            hues.flatMap { hue in
+                (0..<count).map { index in
+                    LabColor(lightness: 40 + Double(index % 15), a: hue + Double(index % 5 - 2) * 0.12, b: 0)
+                }
+            }
+        }
+        let outlier = LabColor(lightness: 99, a: 100, b: -100)
+        let noisy = palette(40) + [outlier]
+        let analysis = try MatchAnalysis.analyze(noisy, clusterCount: 3)
+        XCTAssertEqual(analysis.clusters.count, 3)
+        for (actual, expected) in zip(analysis.clusters.map(\.meanA).sorted(), hues) {
+            XCTAssertLessThan(abs(actual - expected), 0.15)
+        }
+        XCTAssertEqual(analysis.lightnessSamples.count, noisy.count)
+        XCTAssertEqual(analysis.lightnessSamples.last, 99)
+        let singleGroup = try MatchAnalysis.analyze(noisy, clusterCount: 1)
+        XCTAssertLessThan(abs(singleGroup.clusters.first?.meanA ?? .infinity), 0.15)
+
+        // A coherent color covering less than 1% of the photo still matters,
+        // even when its shades occupy different chroma bins.
+        let accent = (0..<8).map { index in
+            LabColor(lightness: 58, a: 36 + Double(index) * 4, b: -44)
+        }
+        let input = palette(330) + accent + [outlier, LabColor(lightness: 95, a: 101, b: -99)]
+        let withAccent = try MatchAnalysis.analyze(input, clusterCount: 4)
+        XCTAssertEqual(withAccent, try MatchAnalysis.analyze(input, clusterCount: 4))
+        XCTAssertEqual(withAccent.clusters.count, 4)
+        guard let accentGroup = withAccent.clusters.last else { XCTFail("Missing accent group"); return }
+        XCTAssertLessThan(abs(accentGroup.meanA - 50), 0.01)
+        XCTAssertLessThan(abs(accentGroup.meanB + 44), 0.01)
+        XCTAssertLessThan(abs(accentGroup.weight - 8.0 / 998.0), 0.0001)
+        XCTAssertLessThan(abs(withAccent.clusters.map(\.weight).reduce(0, +) - 1), 0.000001)
+    }
+
     func testIndependentStrengthsToneMonotonicityAndFlatProtection() throws {
         let source = try MatchAnalysis.analyze(samples(), clusterCount: 1)
         let reference = try MatchAnalysis.analyze(samples(shiftA: 12, shiftB: -8, shiftL: 10), clusterCount: 1)
@@ -131,7 +168,7 @@ final class ColorMatchTests: XCTestCase {
         legacyJSON["adjustments"] = adjustmentsJSON
         let migrated = try Recipe.decode(JSONSerialization.data(withJSONObject: legacyJSON))
         XCTAssertEqual(migrated.version, Recipe.currentVersion)
-        XCTAssertEqual(migrated.pipeline, "luma-sdr-p3-v3")
+        XCTAssertEqual(migrated.pipeline, "luma-sdr-p3-v4")
         XCTAssertEqual(migrated.adjustments, initial)
         legacyJSON["adjustments"] = try JSONSerialization.jsonObject(with: JSONEncoder().encode(edited))
         XCTAssertThrowsError(try Recipe.decode(JSONSerialization.data(withJSONObject: legacyJSON)))

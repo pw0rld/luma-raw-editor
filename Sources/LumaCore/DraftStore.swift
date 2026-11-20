@@ -29,11 +29,16 @@ public struct WorkspaceDraft: Codable {
             throw EditorError.message("自动草稿格式无效。")
         }
         for index in entries.indices {
-            entries[index].recipe = try Recipe.decode(JSONEncoder().encode(entries[index].recipe))
-            try entries[index].saved.validate()
+            try entries[index].recipe.migrateAndValidate()
             guard entries[index].history.undoStack.count <= 100,
                   entries[index].history.redoStack.count <= 100 else { throw EditorError.message("草稿历史过长。") }
-            for state in entries[index].history.undoStack + entries[index].history.redoStack { try state.validate() }
+            if entries[index].recipe.rawProfile != nil {
+                entries[index].saved.legacyWhiteBalance = false
+                entries[index].history.clearIgnoredRAWWhiteBalance()
+            }
+            try entries[index].saved.validate()
+            for state in entries[index].history.undoStack { try state.validate() }
+            for state in entries[index].history.redoStack { try state.validate() }
         }
     }
 }

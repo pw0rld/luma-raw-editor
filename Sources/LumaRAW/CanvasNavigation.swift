@@ -37,6 +37,8 @@ final class CanvasNavigationView: NSView {
     private var windowObserver: NSObjectProtocol?
     private var spaceHeld = false
     private var dragPoint: CGPoint?
+    private var suppressDrag = false
+    private var handlingMouseSequence: Bool { dragPoint != nil || suppressDrag }
     override var isFlipped: Bool { true }
     override func hitTest(_ point: NSPoint) -> NSView? { nil }
 
@@ -67,7 +69,11 @@ final class CanvasNavigationView: NSView {
         }
     }
 
-    func cancelNavigation() { spaceHeld = false; dragPoint = nil }
+    func cancelNavigation() {
+        spaceHeld = false
+        dragPoint = nil
+        suppressDrag = false
+    }
     func stopMonitoring() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         if let windowObserver { NotificationCenter.default.removeObserver(windowObserver) }
@@ -84,10 +90,13 @@ final class CanvasNavigationView: NSView {
             spaceHeld = false
             return nil
         }
-        if event.type == .leftMouseUp, dragPoint != nil {
+        if event.type == .leftMouseUp, handlingMouseSequence {
             dragPoint = nil
+            suppressDrag = false
             return nil
         }
+        // The zoom click owns the rest of its mouse sequence, even outside the canvas.
+        if event.type == .leftMouseDragged, suppressDrag { return nil }
         let point = convert(event.locationInWindow, from: nil)
         if event.type == .leftMouseDragged, let last = dragPoint {
             onPan(CGSize(width: point.x - last.x, height: point.y - last.y))
@@ -101,7 +110,7 @@ final class CanvasNavigationView: NSView {
         let editingText = window.firstResponder is NSTextView || window.firstResponder is NSTextField
         switch event.type {
         case .keyDown where event.charactersIgnoringModifiers?.lowercased() == "j":
-            guard !hasCommandModifier, !editingText else { return event }
+            guard !hasCommandModifier, !event.modifierFlags.contains(.shift), !editingText else { return event }
             if !event.isARepeat { onToggleClipping() }
             return nil
         case .keyDown where event.keyCode == 49:
@@ -111,11 +120,17 @@ final class CanvasNavigationView: NSView {
             return nil
         case .leftMouseDown:
             guard !hasCommandModifier, dragToPan || spaceHeld else { return event }
-            dragPoint = point
-            if event.clickCount == 2 { onDoubleClick(point) }
+            if event.clickCount == 2 {
+                dragPoint = nil
+                suppressDrag = true
+                onDoubleClick(point)
+            } else {
+                suppressDrag = false
+                dragPoint = point
+            }
             return nil
         case .scrollWheel:
-            guard dragPoint == nil, NSEvent.pressedMouseButtons == 0 else { return event }
+            guard !handlingMouseSequence, NSEvent.pressedMouseButtons == 0 else { return event }
             if event.modifierFlags.contains(.command) {
                 onZoom(exp(event.scrollingDeltaY * 0.015), point)
             } else if !hasCommandModifier {
@@ -124,11 +139,11 @@ final class CanvasNavigationView: NSView {
             } else { return event }
             return nil
         case .magnify:
-            guard dragPoint == nil, NSEvent.pressedMouseButtons == 0 else { return event }
+            guard !handlingMouseSequence, NSEvent.pressedMouseButtons == 0 else { return event }
             onZoom(exp(event.magnification), point)
             return nil
         case .smartMagnify:
-            guard dragPoint == nil, NSEvent.pressedMouseButtons == 0 else { return event }
+            guard !handlingMouseSequence, NSEvent.pressedMouseButtons == 0 else { return event }
             onDoubleClick(point)
             return nil
         default: return event

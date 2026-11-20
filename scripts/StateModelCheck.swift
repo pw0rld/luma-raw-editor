@@ -26,6 +26,27 @@ import LumaCore
         model.removeSelectedMask(); model.undo()
         precondition(model.selectedMask?.id == mask.id, "Undo deletion must restore a usable selection")
 
+        model.settings.temperature = 8200
+        model.settings.legacyWhiteBalance = true
+        var legacyMask = model.selectedMask!
+        legacyMask.tintDelta = 25
+        legacyMask.legacyWhiteBalance = true
+        model.setSelectedMask(legacyMask)
+        model.set(\.temperature, value: 8000)
+        precondition(model.settings.legacyWhiteBalance, "Editing an old slider must keep its playback mode")
+        let legacy = model.settings
+        model.convertLegacyWhiteBalance()
+        precondition(!model.settings.legacyWhiteBalance && model.settings.temperature == legacy.temperature)
+        precondition(model.selectedMask?.legacyWhiteBalance == true)
+        model.convertSelectedMaskWhiteBalance()
+        precondition(model.selectedMask?.legacyWhiteBalance == false && model.selectedMask?.tintDelta == 25)
+        model.undo()
+        precondition(model.selectedMask == legacyMask && !model.settings.legacyWhiteBalance)
+        model.undo()
+        precondition(model.settings == legacy)
+        model.redo(); model.redo()
+        precondition(!model.settings.legacyWhiteBalance && model.selectedMask?.legacyWhiteBalance == false)
+
         let fixed = model.settings
         model.busy = true
         model.setCropRect(.full); model.setSelectedMask(\.exposure, value: 2)
@@ -126,6 +147,6 @@ import LumaCore
             print("PASS: native detail state, stale edit/photo rejection, original/full-frame geometry and unchanged recipe/history")
             print("PASS: final-crop histogram, original comparison, independent clipping switches, stale analysis/options rejection and unchanged recipe/history")
         }
-        print("PASS: mask/crop rotation, undo selection, busy protection, valid mask limit, atomic draft, selection persistence and failed draft preservation")
+        print("PASS: mask/crop rotation, legacy white balance conversion and undo, busy protection, mask limit, atomic draft and failed draft preservation")
     }
 }

@@ -15,6 +15,7 @@ struct CanvasRenderState: Equatable {
 
 @MainActor final class EditorModel: ObservableObject {
     @Published var photos: [URL] = []
+    @Published private(set) var unavailablePhotos: Set<URL> = []
     @Published var includeSubfolders = true
     private struct Session {
         let sha256: String
@@ -25,6 +26,7 @@ struct CanvasRenderState: Equatable {
         let selectedMaskID: UUID?
     }
     @Published private var sessions: [URL: Session] = [:]
+    private var restoredActiveURL: URL?
     @Published var photo: PhotoInfo?
     @Published var settings = Adjustments() { didSet { scheduleDraft() } }
     @Published var preview: CGImage?
@@ -139,8 +141,7 @@ struct CanvasRenderState: Equatable {
     func renderClipping(_ image: CGImage, source: CanvasRenderState, options: ClippingOptions) async throws -> CGImage? {
         try Task.checkCancellation()
         guard canvasRenderState == source, clippingOptions == options else { throw CancellationError() }
-        let renderer = engine
-        let overlay = try await renderer.clippingOverlay(image, options: options)
+        let overlay = try await OutputDiagnostics.renderClippingOverlay(image, options: options)
         try Task.checkCancellation()
         guard canvasRenderState == source, clippingOptions == options else { throw CancellationError() }
         return overlay
@@ -187,7 +188,7 @@ struct CanvasRenderState: Equatable {
                                rawProfile: photo.profile, adjustments: settings),
                 saved: savedSettings, history: history, selectedMaskID: selectedMaskID))
         }
-        return WorkspaceDraft(photos: photos, activeURL: photo?.url, entries: documents)
+        return WorkspaceDraft(photos: photos, activeURL: photo?.url ?? restoredActiveURL, entries: documents)
     }
     private func scheduleDraft() {
         guard draftStore != nil, !restoringDraft else { return }
@@ -211,16 +212,18 @@ struct CanvasRenderState: Equatable {
         do {
             guard let snapshot = try await draftStore.load() else { return }
             photos = snapshot.photos
+            restoredActiveURL = snapshot.activeURL.flatMap { photos.contains($0) ? $0 : nil }
             for entry in snapshot.entries {
                 sessions[entry.sourceURL] = Session(sha256: entry.recipe.sourceSHA256, profile: entry.recipe.rawProfile,
                     settings: entry.recipe.adjustments, saved: entry.saved, history: entry.history,
                     selectedMaskID: entry.selectedMaskID)
             }
-            let existing = photos.filter { FileManager.default.fileExists(atPath: $0.path) }
+            unavailablePhotos = Set(photos.filter { !FileManager.default.fileExists(atPath: $0.path) })
+            let existing = photos.filter { !unavailablePhotos.contains($0) }
             let active = snapshot.activeURL.flatMap { existing.contains($0) ? $0 : nil } ?? existing.first
             if let active { busy = false; await open(active).value }
             draftStatus = "已恢复 \(snapshot.entries.count) 张草稿"
-            if existing.count < photos.count { draftStatus += " · \(photos.count - existing.count) 张原片未找到" }
+            if !unavailablePhotos.isEmpty { draftStatus += " · \(unavailablePhotos.count) 张原片不可用" }
         } catch { draftRestoreFailed = true; self.error = "无法恢复自动草稿：\(error.localizedDescription)" }
     }
     func prepareToQuit() async -> Bool {
@@ -337,7 +340,7 @@ struct CanvasRenderState: Equatable {
                 busy = false
                 status = "新增 \(added.count) 张 · 共 \(photos.count) 张"
                 if files.isEmpty { status = "文件夹中没有支持的照片" }
-                if photo == nil, let first = photos.first { await open(first).value }
+                if photo == nil, let first = photos.first(where: { !unavailablePhotos.contains($0) }) { await open(first).value }
             } catch { busy = false; self.error = error.localizedDescription; status = "扫描失败" }
         }
     }
@@ -345,6 +348,27 @@ struct CanvasRenderState: Equatable {
         if photo?.url == url { return dirty }
         guard let session = sessions[url] else { return false }
         return session.settings != session.saved
+    }
+    func canRelink(_ url: URL) -> Bool {
+        photo?.url == url || sessions[url] != nil
+    }
+    func locateOriginal(_ url: URL) {
+        guard !busy, canRelink(url) else { return }
+        let panel = NSOpenPanel(); panel.allowedContentTypes = [.image, .rawImage]
+        panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
+        panel.prompt = "重新定位"
+        panel.message = "请为 \(url.lastPathComponent) 选择原片。可以改名或移动，但文件内容必须一致。"
+        guard panel.runModal() == .OK, let replacement = panel.url else { return }
+        relinkOriginal(url, to: replacement)
+    }
+    @discardableResult func relinkOriginal(_ original: URL, to replacement: URL) -> Task<Void, Never> {
+        guard !busy, canRelink(original), photos.contains(original) else { return Task {} }
+        let url = replacement.resolvingSymlinksInPath().standardizedFileURL
+        guard original == url || !photos.contains(url) else {
+            error = "所选路径已属于工作区中的另一张照片。"
+            return Task {}
+        }
+        return openPhoto(url, relinking: original)
     }
     private func stashCurrent() {
         guard let photo else { return }
@@ -359,42 +383,67 @@ struct CanvasRenderState: Equatable {
     @discardableResult func open(_ inputURL: URL) -> Task<Void, Never> {
         guard !busy else { return Task {} }
         let url = inputURL.resolvingSymlinksInPath().standardizedFileURL
-        if photo?.url == url { return Task {} }
+        if photo?.url == url, !unavailablePhotos.contains(url) {
+            if !FileManager.default.fileExists(atPath: url.path) {
+                unavailablePhotos.insert(url)
+                status = "原片不可用 · 请在照片列表中重新定位"
+            }
+            return Task {}
+        }
+        return openPhoto(url)
+    }
+    private func openPhoto(_ url: URL, relinking original: URL? = nil) -> Task<Void, Never> {
         stashCurrent()
-        previewTask?.cancel(); generation += 1; busy = true; status = "读取照片与校验原片…"
+        let session = sessions[original ?? url]
+        let previousStatus = status
+        previewTask?.cancel(); generation += 1; busy = true
+        status = original == nil ? "读取照片与校验原片…" : "校验重新定位的原片…"
         return Task {
             do {
                 let candidate = ImageEngine()
                 let result = try await candidate.open(url)
-                if let session = sessions[url], session.sha256 != result.sha256 || session.profile != result.profile {
+                if let session, session.sha256 != result.sha256 || session.profile != result.profile {
+                    if original != nil {
+                        throw EditorError.message("所选文件的内容或 RAW 解码配置与原片不匹配，草稿已保留。")
+                    }
                     throw EditorError.message("原片或 RAW 解码配置已改变，旧草稿已保留。请使用原片的正确版本，或另存副本作为新照片导入。")
                 }
                 let initialPreview = try await candidate.preview(result.initial, profile: result.profile)
-                var nextSettings = result.initial
-                if let session = sessions[url], session.sha256 == result.sha256, session.profile == result.profile {
-                    nextSettings = session.settings
-                }
+                let nextSettings = session?.settings ?? result.initial
                 let nextPreview = nextSettings == result.initial ? initialPreview
                     : try await candidate.preview(nextSettings, profile: result.profile)
+                try Task.checkCancellation()
                 // The candidate is fully readable and compatible before it can
                 // change the list, active document or the next draft snapshot.
-                if !photos.contains(url) { photos.append(url) }
+                if let original, original != url, let index = photos.firstIndex(of: original) {
+                    photos[index] = url
+                    sessions[original] = nil
+                    unavailablePhotos.remove(original)
+                } else if !photos.contains(url) {
+                    photos.append(url)
+                }
+                unavailablePhotos.remove(url)
                 engine = candidate
-                photo = result; settings = result.initial; savedSettings = result.initial
-                history = EditHistory(); compare = false; selectedMaskID = nil; preview = nil; cropPreview = nil; originalPreview = nil
+                photo = result; settings = nextSettings; savedSettings = session?.saved ?? result.initial
+                history = session?.history ?? EditHistory()
+                compare = false; selectedMaskID = nil; preview = nil; cropPreview = nil; originalPreview = nil
                 renderedSettings = nil; maskOverlayPreview = nil
                 previewIsFullFrame = false
                 originalPreview = initialPreview
-                if let session = sessions[url], session.sha256 == result.sha256, session.profile == result.profile {
-                    settings = session.settings; savedSettings = session.saved; history = session.history
-                }
                 tool = .browse
-                selectedMaskID = sessions[url]?.selectedMaskID
+                selectedMaskID = session?.selectedMaskID
                 normalizeMaskSelection()
                 preview = nextPreview; renderedSettings = settings; previewQuarterTurns = settings.quarterTurns
-                status = "\(result.isRAW ? "RAW" : "RGB") · \(result.width) × \(result.height) · \(result.backend)"
+                let description = "\(result.isRAW ? "RAW" : "RGB") · \(result.width) × \(result.height) · \(result.backend)"
+                status = original == nil ? description : "已重新定位 · \(description)"
             } catch {
-                self.error = error.localizedDescription; status = "读取失败"
+                if Task.isCancelled || error is CancellationError {
+                    status = previousStatus
+                } else {
+                    if original == nil, photos.contains(url) { unavailablePhotos.insert(url) }
+                    self.error = error.localizedDescription
+                    status = original == nil ? "读取失败" : "重新定位失败 · 草稿已保留"
+                }
                 busy = false; rendering = false
                 // The old engine/document is still active. Resume cancelled
                 // pixel or mask-overlay work, even when its settings were equal.
@@ -454,6 +503,14 @@ struct CanvasRenderState: Equatable {
         guard (try? next.validate()) != nil else { return }
         settings = next
         if gestureStart == nil { history.record(from: previous, to: settings) }
+        schedulePreview()
+    }
+    func convertLegacyWhiteBalance() {
+        guard photo?.isRAW == false, !busy, settings.legacyWhiteBalance else { return }
+        finishGesture()
+        let before = settings
+        settings.legacyWhiteBalance = false
+        history.record(from: before, to: settings)
         schedulePreview()
     }
     var cropRect: CropRect { settings.cropRect }
@@ -547,6 +604,12 @@ struct CanvasRenderState: Equatable {
         settings.localMasks[index] = value
         if gestureStart == nil { history.record(from: before, to: settings) }
         schedulePreview()
+    }
+    func convertSelectedMaskWhiteBalance() {
+        guard !busy, var mask = selectedMask, mask.legacyWhiteBalance else { return }
+        finishGesture()
+        mask.legacyWhiteBalance = false
+        setSelectedMask(mask)
     }
     func undo() {
         guard !busy else { return }; finishGesture()

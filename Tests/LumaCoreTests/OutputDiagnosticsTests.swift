@@ -80,7 +80,13 @@ final class OutputDiagnosticsTests: XCTestCase {
         XCTAssertEqual(OutputDiagnostics.overlayRegion(crop: crop, fullSize: CGSize(width: CGFloat.infinity, height: 81), sourceRect: .zero), .zero)
         let task = Task { withUnsafeCurrentTask { $0?.cancel() }; return try OutputDiagnostics.histogram(wide) }
         do { _ = try await task.value; XCTFail("Cancelled histogram completed") } catch is CancellationError { }
-        let overlayTask = Task { withUnsafeCurrentTask { $0?.cancel() }; return try OutputDiagnostics.clippingOverlay(wide, options: .all) }
+        let endpoints = image([0, 0, 0, 255, 255, 255, 255, 255], width: 2, height: 1)
+        let overlay = try await OutputDiagnostics.renderClippingOverlay(endpoints, options: .all)
+        XCTAssertEqual(overlay.map(bytes), [0, 0, 255, 255, 255, 0, 0, 255])
+        let overlayTask = Task {
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await OutputDiagnostics.renderClippingOverlay(wide, options: .all)
+        }
         do { _ = try await overlayTask.value; XCTFail("Cancelled overlay completed") } catch is CancellationError { }
     }
 

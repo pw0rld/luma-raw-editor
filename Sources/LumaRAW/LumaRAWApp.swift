@@ -11,8 +11,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if ProcessInfo.processInfo.environment["LUMA_SMOKE_SNAPSHOT"] != nil { return .terminateNow }
-        if model?.busy == true { return .terminateCancel }
         guard let model else { return .terminateNow }
+        if model.busy {
+            model.status = "正在处理任务，请等待完成后再退出"
+            return .terminateCancel
+        }
         Task { @MainActor in NSApp.reply(toApplicationShouldTerminate: await model.prepareToQuit()) }
         return .terminateLater
     }
@@ -142,7 +145,12 @@ struct EditorView: View {
                 VStack(spacing: 18) {
                     Image(systemName: "camera.aperture").font(.system(size: 60, weight: .ultraLight)).foregroundStyle(.orange)
                     Text("给照片一点光").font(.system(size: 25, weight: .light))
-                    Text("RAW / DNG / JPEG / TIFF / PNG / HEIC").font(.caption).foregroundStyle(.secondary)
+                    if model.photos.contains(where: { model.unavailablePhotos.contains($0) && model.canRelink($0) }) {
+                        Text("在照片列表中点击「原片不可用」的照片，为草稿重新定位。")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("RAW / DNG / JPEG / TIFF / PNG / HEIC").font(.caption).foregroundStyle(.secondary)
+                    }
                     Button("导入照片…", action: model.importPhoto).buttonStyle(AccentButtonStyle()).disabled(model.busy)
                     Button("添加文件夹…", action: { model.addFolder() }).disabled(model.busy)
                     Toggle("包含子文件夹", isOn: $model.includeSubfolders).font(.caption).fixedSize().disabled(model.busy)
@@ -159,17 +167,34 @@ struct EditorView: View {
             ScrollViewReader { proxy in
                 List {
                     ForEach(model.photos, id: \.self) { url in
-                        Button(action: { model.open(url) }) {
+                        let unavailable = model.unavailablePhotos.contains(url)
+                        let canRelink = model.canRelink(url)
+                        Button {
+                            if unavailable && canRelink { model.locateOriginal(url) }
+                            else { model.open(url) }
+                        } label: {
                             HStack(spacing: 8) {
-                                Image(systemName: "photo").foregroundStyle(model.photo?.url == url ? .orange : .secondary)
+                                Image(systemName: unavailable ? "exclamationmark.triangle" : "photo")
+                                    .foregroundStyle(model.photo?.url == url || unavailable ? .orange : .secondary)
                                 VStack(alignment: .leading, spacing: 3) {
                                     Text(url.lastPathComponent).font(.caption).lineLimit(1).truncationMode(.middle)
-                                    Text(url.deletingLastPathComponent().lastPathComponent).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                    Text(unavailable ? "原片不可用" : url.deletingLastPathComponent().lastPathComponent)
+                                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                                 }
                                 Spacer(minLength: 0)
+                                if unavailable && canRelink {
+                                    Image(systemName: "link").font(.caption).foregroundStyle(.secondary)
+                                        .accessibilityHidden(true)
+                                }
                                 if model.isUnsaved(url) { Circle().fill(.orange).frame(width: 5, height: 5) }
                             }.padding(.vertical, 5).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                        }.buttonStyle(.plain).help(url.path).id(url)
+                        }.buttonStyle(.plain)
+                            .help(unavailable && canRelink ? "点击重新定位原片\n\(url.path)" : url.path)
+                            .contextMenu {
+                                if canRelink { Button("重新定位原片…") { model.locateOriginal(url) } }
+                                if unavailable { Button("重试原路径") { model.open(url) } }
+                            }
+                            .id(url)
                             .listRowBackground(model.photo?.url == url ? Color.orange.opacity(0.16) : Color.clear)
                     }
                 }.listStyle(.plain)
@@ -193,6 +218,11 @@ struct EditorView: View {
                 slider("色温", key: \.temperature, range: 2000...50000, format: "%.0f K")
                 slider("色调", key: \.tint, range: -150...150, format: "%+.0f")
                 Text(model.photo?.isRAW == true ? "初始值来自相机白平衡" : "普通图片以 6500 K 为相对中性点").font(.caption2).foregroundStyle(.secondary)
+                if model.photo?.isRAW == false, model.settings.legacyWhiteBalance {
+                    Button("转换为新版白平衡", action: model.convertLegacyWhiteBalance)
+                        .font(.caption)
+                        .help("当前使用旧版色温与色调方向。转换会改变画面，可撤销。")
+                }
                 Divider()
                 groupTitle("光线与颜色", symbol: "sun.max")
                 slider("曝光", key: \.exposure, range: -5...5, format: "%+.2f EV")
@@ -201,7 +231,7 @@ struct EditorView: View {
                 groupTitle("色调曲线", symbol: "point.topleft.down.to.point.bottomright.curvepath")
                 CurveView(settings: model.settings).frame(height: 105)
                 slider("暗部", key: \.shadows, range: 0...model.settings.midtones, format: "%.2f")
-                slider("中间调", key: \.midtones, range: 0.01...0.99, format: "%.2f")
+                slider("中间调", key: \.midtones, range: 0...1, format: "%.2f")
                 slider("亮部", key: \.highlights, range: model.settings.midtones...1, format: "%.2f")
                 Divider()
                 HStack { groupTitle("构图", symbol: "crop.rotate"); Spacer(); Button("旋转 90°", action: model.rotate).font(.caption) }
@@ -318,6 +348,11 @@ struct EditorView: View {
             maskSlider("局部曝光", key: \.exposure, range: -5...5, format: "%+.2f EV")
             maskSlider("色温偏移", key: \.temperatureDelta, range: -4000...4000, format: "%+.0f K")
             maskSlider("色调偏移", key: \.tintDelta, range: -150...150, format: "%+.0f")
+            if mask.legacyWhiteBalance {
+                Button("转换为新版蒙版白平衡", action: model.convertSelectedMaskWhiteBalance)
+                    .font(.caption)
+                    .help("当前蒙版使用旧版色温与色调方向。转换会改变画面，可撤销。")
+            }
             maskSlider("饱和度", key: \.saturation, range: 0...2, format: "%.2f")
             maskSlider("强度", key: \.opacity, range: 0...1, format: "%.0f%%", displayScale: 100)
             maskSlider("羽化", key: \.feather, range: 0...1, format: "%.0f%%", displayScale: 100)
@@ -343,8 +378,20 @@ struct EditorView: View {
     }
     private func slider(_ title: String, key: WritableKeyPath<Adjustments, Double>, range: ClosedRange<Double>, format: String, displayScale: Double = 1) -> some View {
         VStack(spacing: 6) {
-            HStack { Text(title); Spacer(); Text(String(format: format, model.settings[keyPath: key] * displayScale)).monospacedDigit().foregroundStyle(.secondary) }.font(.caption)
-            Slider(value: Binding(get: { model.settings[keyPath: key] }, set: { model.set(key, value: $0) }), in: range, onEditingChanged: model.gesture).tint(.orange)
+            let fixed = range.lowerBound == range.upperBound
+            HStack {
+                Text(title)
+                Spacer()
+                if fixed {
+                    Image(systemName: "lock.fill").foregroundStyle(.secondary).accessibilityLabel("当前固定")
+                }
+                Text(String(format: format, model.settings[keyPath: key] * displayScale))
+                    .monospacedDigit().foregroundStyle(.secondary)
+            }.font(.caption)
+            if !fixed {
+                Slider(value: Binding(get: { model.settings[keyPath: key] }, set: { model.set(key, value: $0) }),
+                       in: range, onEditingChanged: model.gesture).tint(.orange)
+            }
         }
     }
     private func maskSlider(_ title: String, key: WritableKeyPath<LocalMask, Double>, range: ClosedRange<Double>, format: String, displayScale: Double = 1) -> some View {

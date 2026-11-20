@@ -56,6 +56,7 @@ public struct LocalMask: Codable, Equatable, Identifiable {
     public var enabled: Bool
     // Preserve the original v2 transition when importing an existing linear mask.
     public var legacyLinearFalloff = false
+    public var legacyWhiteBalance = false
 
     public var isNeutral: Bool {
         !enabled || opacity == 0 || (exposure == 0 && temperatureDelta == 0 && tintDelta == 0 && saturation == 1)
@@ -87,6 +88,7 @@ public struct LocalMask: Codable, Equatable, Identifiable {
     private enum CodingKeys: String, CodingKey {
         case id, kind, x, y, width, height, angle, exposure, temperatureDelta
         case tintDelta, saturation, opacity, feather, inverted, enabled, legacyLinearFalloff
+        case legacyWhiteBalance
     }
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -106,6 +108,8 @@ public struct LocalMask: Codable, Equatable, Identifiable {
         inverted = try c.decodeIfPresent(Bool.self, forKey: .inverted) ?? false
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         legacyLinearFalloff = try c.decodeIfPresent(Bool.self, forKey: .legacyLinearFalloff) ?? false
+        legacyWhiteBalance = try c.decodeIfPresent(Bool.self, forKey: .legacyWhiteBalance)
+            ?? (temperatureDelta != 0 || tintDelta != 0)
     }
 
     public func validate() throws {
@@ -125,6 +129,8 @@ public struct LocalMask: Codable, Equatable, Identifiable {
 public struct Adjustments: Codable, Equatable {
     public var temperature = 6500.0
     public var tint = 0.0
+    /// Applies only to rendered RGB sources. RAW uses the decoder's neutral controls.
+    public var legacyWhiteBalance = false
     public var exposure = 0.0
     public var saturation = 1.0
     public var shadows = 0.25
@@ -165,12 +171,15 @@ public struct Adjustments: Codable, Equatable {
     private enum CodingKeys: String, CodingKey {
         case temperature, tint, exposure, saturation, shadows, midtones, highlights, quarterTurns
         case horizontalTrim, verticalTrim, cropRect, colorMatch
-        case localMasks
+        case localMasks, legacyWhiteBalance
     }
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? 6500
         tint = try container.decodeIfPresent(Double.self, forKey: .tint) ?? 0
+        // This also covers standalone adjustment values in draft undo/redo stacks.
+        legacyWhiteBalance = try container.decodeIfPresent(Bool.self, forKey: .legacyWhiteBalance)
+            ?? (temperature != 6500 || tint != 0)
         exposure = try container.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
         saturation = try container.decodeIfPresent(Double.self, forKey: .saturation) ?? 1
         shadows = try container.decodeIfPresent(Double.self, forKey: .shadows) ?? 0.25
@@ -188,6 +197,7 @@ public struct Adjustments: Codable, Equatable {
     public func encode(to encoder: Encoder) throws {
         var container = encoder.container(keyedBy: CodingKeys.self)
         try container.encode(temperature, forKey: .temperature); try container.encode(tint, forKey: .tint)
+        try container.encode(legacyWhiteBalance, forKey: .legacyWhiteBalance)
         try container.encode(exposure, forKey: .exposure); try container.encode(saturation, forKey: .saturation)
         try container.encode(shadows, forKey: .shadows); try container.encode(midtones, forKey: .midtones)
         try container.encode(highlights, forKey: .highlights); try container.encode(quarterTurns, forKey: .quarterTurns)
@@ -225,9 +235,10 @@ public struct RAWProfile: Codable, Equatable {
 }
 
 public struct Recipe: Codable, Equatable {
-    public static let currentVersion = 3
-    public var version = 3
-    public var pipeline = "luma-sdr-p3-v3"
+    public static let currentVersion = 4
+    public static let currentPipeline = "luma-sdr-p3-v4"
+    public var version = Self.currentVersion
+    public var pipeline = Self.currentPipeline
     public var sourceName: String
     public var sourceSHA256: String
     public var rawProfile: RAWProfile?
@@ -243,18 +254,27 @@ public struct Recipe: Codable, Equatable {
     }
     public static func decode(_ data: Data) throws -> Recipe {
         var value = try JSONDecoder().decode(Recipe.self, from: data)
-        if value.version == 1, value.pipeline == "luma-sdr-p3-v1", value.adjustments.colorMatch == nil {
-            value.version = Self.currentVersion; value.pipeline = "luma-sdr-p3-v3"
-        } else if value.version == 2, value.pipeline == "luma-sdr-p3-v2" {
-            for index in value.adjustments.localMasks.indices where value.adjustments.localMasks[index].kind == .linear {
-                value.adjustments.localMasks[index].legacyLinearFalloff = true
+        try value.migrateAndValidate()
+        return value
+    }
+    mutating func migrateAndValidate() throws {
+        if version == 2, pipeline == "luma-sdr-p3-v2" {
+            for index in adjustments.localMasks.indices where adjustments.localMasks[index].kind == .linear {
+                adjustments.localMasks[index].legacyLinearFalloff = true
             }
-            value.version = Self.currentVersion; value.pipeline = "luma-sdr-p3-v3"
         }
-        try value.validate(); return value
+        let supportedLegacy = (version == 1 && pipeline == "luma-sdr-p3-v1" && adjustments.colorMatch == nil)
+            || (version == 2 && pipeline == "luma-sdr-p3-v2")
+            || (version == 3 && pipeline == "luma-sdr-p3-v3")
+        if supportedLegacy {
+            version = Self.currentVersion
+            pipeline = Self.currentPipeline
+        }
+        if rawProfile != nil { adjustments.legacyWhiteBalance = false }
+        try validate()
     }
     public func validate() throws {
-        guard version == Self.currentVersion, pipeline == "luma-sdr-p3-v3" else {
+        guard version == Self.currentVersion, pipeline == Self.currentPipeline else {
             throw EditorError.message("不支持此配方版本或处理管线。")
         }
         guard sourceSHA256.count == 64, sourceSHA256.allSatisfy({ $0.isHexDigit }) else {
@@ -281,6 +301,10 @@ public struct EditHistory: Codable {
     public private(set) var undoStack: [Adjustments] = []
     public private(set) var redoStack: [Adjustments] = []
     public init() {}
+    mutating func clearIgnoredRAWWhiteBalance() {
+        for index in undoStack.indices { undoStack[index].legacyWhiteBalance = false }
+        for index in redoStack.indices { redoStack[index].legacyWhiteBalance = false }
+    }
     public mutating func record(from: Adjustments, to: Adjustments) {
         guard from != to else { return }
         undoStack.append(from)

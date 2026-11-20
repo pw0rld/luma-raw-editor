@@ -10,9 +10,89 @@ import LumaCore
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory) }
         try await changedSource(samples: samples, directory: directory)
+        try await relinkOfflineSource(samples: samples, directory: directory)
         try await failedImport(samples: samples, directory: directory)
         try await gestureCancellation(samples: samples)
         try await changedRAWProfile(directory: directory)
+    }
+
+    @MainActor private static func relinkOfflineSource(samples: URL, directory: URL) async throws {
+        let source = directory.appendingPathComponent("offline.png")
+        let other = directory.appendingPathComponent("still-online.jpg")
+        let replacement = directory.appendingPathComponent("relocated.png")
+        let wrong = directory.appendingPathComponent("mismatch.png")
+        let sourceData = try Data(contentsOf: samples.appendingPathComponent("match-source.png"))
+        try sourceData.write(to: source)
+        try Data(contentsOf: samples.appendingPathComponent("orientation-test.jpg")).write(to: other)
+        try Data(contentsOf: samples.appendingPathComponent("match-reference.png")).write(to: wrong)
+        let draftURL = directory.appendingPathComponent("relink-draft.json")
+        let store = DraftStore(url: draftURL)
+        let model = EditorModel(draftURL: draftURL)
+        await model.open(source).value
+        model.set(\.exposure, value: 1.25)
+        model.addMask(kind: .radial)
+        model.addMask(kind: .linear)
+        model.undo()
+        await model.waitForPreview()
+        await model.open(other).value
+        await model.open(source).value
+        let saved = await model.flushDraft(); precondition(saved)
+        let initial = try await store.load()!
+        let edit = initial.entries.first { $0.sourceURL == source }!
+        precondition(!edit.history.undoStack.isEmpty && !edit.history.redoStack.isEmpty && edit.selectedMaskID != nil)
+
+        try FileManager.default.moveItem(at: source, to: replacement)
+        let restored = EditorModel(draftURL: draftURL)
+        await restored.restoreDrafts()
+        precondition(restored.error == nil && restored.photo?.url == other && restored.unavailablePhotos == [source])
+        precondition(restored.canRelink(source))
+        let activeBefore = restored.settings
+        await restored.relinkOriginal(source, to: other).value
+        precondition(restored.error != nil && restored.photos == initial.photos && restored.photo?.url == other)
+        restored.error = nil
+        let cancelled = restored.relinkOriginal(source, to: replacement)
+        cancelled.cancel()
+        await cancelled.value
+        precondition(restored.error == nil && restored.photos == initial.photos && restored.settings == activeBefore)
+        await restored.relinkOriginal(source, to: wrong).value
+        precondition(restored.error != nil && restored.photo?.url == other && restored.settings == activeBefore)
+        precondition(restored.photos == initial.photos && restored.unavailablePhotos == [source])
+        let savedAfterMismatch = await restored.flushDraft(); precondition(savedAfterMismatch)
+        let retained = try await store.load()!.entries.first { $0.sourceURL == source }!
+        checkRetained(retained, edit)
+
+        restored.error = nil
+        await restored.relinkOriginal(source, to: replacement).value
+        precondition(restored.error == nil && restored.photo?.url == replacement)
+        precondition(restored.photos == [replacement, other] && restored.unavailablePhotos.isEmpty)
+        precondition(restored.settings == edit.recipe.adjustments && restored.selectedMaskID == edit.selectedMaskID)
+        precondition(restored.history.undoStack == edit.history.undoStack && restored.history.redoStack == edit.history.redoStack)
+        let relinkSaved = await restored.flushDraft(); precondition(relinkSaved)
+        let updated = try await store.load()!
+        precondition(updated.activeURL == replacement && updated.photos == [replacement, other])
+        precondition(!updated.entries.contains { $0.sourceURL == source })
+        let entry = updated.entries.first { $0.sourceURL == replacement }!
+        precondition(entry.recipe.sourceName == replacement.lastPathComponent && entry.recipe.sourceSHA256 == edit.recipe.sourceSHA256)
+        precondition(entry.saved == edit.saved && entry.selectedMaskID == edit.selectedMaskID)
+        let unchanged = try Data(contentsOf: replacement); precondition(unchanged == sourceData)
+        let reopened = EditorModel(draftURL: draftURL)
+        await reopened.restoreDrafts()
+        precondition(reopened.error == nil && reopened.photo?.url == replacement && reopened.settings == edit.recipe.adjustments)
+        restored.redo(); precondition(restored.settings == edit.history.redoStack.last)
+
+        let allOffline = directory.appendingPathComponent("all-offline.json")
+        let allOfflineStore = DraftStore(url: allOffline)
+        try await allOfflineStore.save(WorkspaceDraft(photos: [source], activeURL: source, entries: [edit]))
+        let empty = EditorModel(draftURL: allOffline)
+        await empty.restoreDrafts()
+        precondition(empty.photo == nil && empty.unavailablePhotos == [source] && empty.canRelink(source))
+        let emptySaved = await empty.flushDraft(); precondition(emptySaved)
+        let missingDraft = try await allOfflineStore.load()!
+        precondition(missingDraft.activeURL == source)
+        checkRetained(missingDraft.entries[0], edit)
+        await empty.relinkOriginal(source, to: replacement).value
+        precondition(empty.error == nil && empty.photo?.url == replacement && empty.settings == edit.recipe.adjustments)
+        print("PASS: offline relink validates bytes before changing the path; cancellation, workspace order, edits and undo/redo survive")
     }
 
     @MainActor private static func changedSource(samples: URL, directory: URL) async throws {
@@ -167,7 +247,16 @@ import LumaCore
         let profileSaved = await model.flushDraft(); precondition(profileSaved)
         let retained = try await DraftStore(url: url).load()!.entries[0]
         checkRetained(retained, entry)
-        print("PASS: same-SHA RAW profile mismatch rejected and old editing draft retained")
+        let moved = directory.appendingPathComponent("moved-profile.dng")
+        try FileManager.default.moveItem(at: source, to: moved)
+        model.error = nil
+        await model.relinkOriginal(source, to: moved).value
+        precondition(model.error != nil && model.photo == nil && model.photos == [source])
+        let savedAfterRelink = await model.flushDraft(); precondition(savedAfterRelink)
+        let afterRelink = try await DraftStore(url: url).load()!
+        precondition(afterRelink.activeURL == source)
+        checkRetained(afterRelink.entries[0], entry)
+        print("PASS: same-SHA RAW profile mismatch rejected on startup and relink; draft retained")
     }
 
     private static func checkRetained(_ value: DraftEntry, _ before: DraftEntry) {

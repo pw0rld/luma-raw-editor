@@ -70,11 +70,16 @@ public struct DetailPlan: Equatable {
               fullSize.width.isFinite, fullSize.height.isFinite, fullSize.width > 0, fullSize.height > 0 else {
             throw EditorError.message("细节分块参数无效。")
         }
-        let bounds = CGRect(x: 0, y: 0, width: ceil(fullSize.width / CGFloat(tile.divisor)), height: ceil(fullSize.height / CGFloat(tile.divisor)))
+        let bounds = CGRect(origin: .zero, size: sampledSize(for: fullSize, divisor: tile.divisor))
         let rect = CGRect(x: tile.x * tileSide, y: tile.y * tileSide, width: tileSide, height: tileSide)
             .insetBy(dx: -2, dy: -2).intersection(bounds)
         guard !rect.isNull, rect.width > 0, rect.height > 0 else { throw EditorError.message("细节分块超出照片范围。") }
         return rect
+    }
+
+    static func sampledSize(for fullSize: CGSize, divisor: Int) -> CGSize {
+        let step = CGFloat(divisor)
+        return CGSize(width: ceil(fullSize.width / step), height: ceil(fullSize.height / step))
     }
 }
 

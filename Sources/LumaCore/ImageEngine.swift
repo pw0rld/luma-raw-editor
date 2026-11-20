@@ -31,6 +31,7 @@ public actor ImageEngine {
     private var detailRaw: CIRAWFilter?
     private var detailGraph: (settings: Adjustments, profile: RAWProfile?, image: CIImage)?
     private var detailTiles: [DetailTile] = []
+    private var sourceGeneration = 0
     private var histogramCache: [(settings: Adjustments, profile: RAWProfile?, value: OutputHistogram)] = []
     public static let detailCacheByteLimit = 48 * 1024 * 1024
     private let detailCacheLimit: Int
@@ -104,6 +105,7 @@ public actor ImageEngine {
         // Commit only after a successful open, so a bad file doesn't destroy the current document.
         raw = nextRaw; bitmap = nextBitmap; properties = props; info = nextInfo
         detailRaw = nil; detailGraph = nil; detailTiles = []; detailCacheBytes = 0
+        sourceGeneration += 1
         histogramCache = []
         context.clearCaches()
         return nextInfo
@@ -193,13 +195,20 @@ public actor ImageEngine {
         return result.cropped(to: e)
     }
 
+    private func whiteBalance(_ image: CIImage, temperature: Double, tint: Double, legacy: Bool) -> CIImage {
+        let reference = CIVector(x: 6500, y: 0)
+        let chosen = CIVector(x: temperature, y: tint)
+        return image.applyingFilter("CITemperatureAndTint", parameters: [
+            "inputNeutral": legacy ? reference : chosen,
+            "inputTargetNeutral": legacy ? chosen : reference])
+    }
+
     private func applying(_ mask: LocalMask, to image: CIImage) -> CIImage {
         if mask.isNeutral { return image }
         var variant = image
         if mask.temperatureDelta != 0 || mask.tintDelta != 0 {
-            variant = variant.applyingFilter("CITemperatureAndTint", parameters: [
-                "inputNeutral": CIVector(x: 6500, y: 0),
-                "inputTargetNeutral": CIVector(x: 6500 + mask.temperatureDelta, y: mask.tintDelta)])
+            variant = whiteBalance(variant, temperature: 6500 + mask.temperatureDelta,
+                                   tint: mask.tintDelta, legacy: mask.legacyWhiteBalance)
         }
         if mask.exposure != 0 {
             variant = variant.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: mask.exposure])
@@ -233,9 +242,8 @@ public actor ImageEngine {
         } else if let bitmap {
             image = bitmap
             if settings.temperature != 6500 || settings.tint != 0 {
-                image = image.applyingFilter("CITemperatureAndTint", parameters: [
-                    "inputNeutral": CIVector(x: 6500, y: 0),
-                    "inputTargetNeutral": CIVector(x: settings.temperature, y: settings.tint)])
+                image = whiteBalance(image, temperature: settings.temperature,
+                                     tint: settings.tint, legacy: settings.legacyWhiteBalance)
             }
             if settings.exposure != 0 { image = image.applyingFilter("CIExposureAdjust", parameters: [kCIInputEVKey: settings.exposure]) }
         } else { throw EditorError.message("原片不可用。") }
@@ -287,20 +295,23 @@ public actor ImageEngine {
     /// Statistics always describe the entire final crop. A caller can reuse the
     /// matching browse preview; crop/mask tools otherwise render the final crop.
     /// Two small count tables cover original comparison and the current edit.
-    public func histogram(_ settings: Adjustments, profile: RAWProfile?, matchingPreview: CGImage? = nil) throws -> OutputHistogram {
+    public func histogram(_ settings: Adjustments, profile: RAWProfile?, matchingPreview: CGImage? = nil) async throws -> OutputHistogram {
         try Task.checkCancellation(); try settings.validate()
         guard info != nil else { throw EditorError.message("请先导入照片。") }
         if let cached = histogramCache.first(where: { $0.settings == settings && $0.profile == profile }) { return cached.value }
+        let generation = sourceGeneration
         let image = try matchingPreview ?? preview(settings, profile: profile)
-        let value = try OutputDiagnostics.histogram(image)
+        let value = try await OutputDiagnosticsWorker.shared.histogram(image)
         try Task.checkCancellation()
+        guard sourceGeneration == generation else { throw CancellationError() }
+        if let cached = histogramCache.first(where: { $0.settings == settings && $0.profile == profile }) { return cached.value }
         if histogramCache.count == 2 { histogramCache.removeFirst() }
         histogramCache.append((settings, profile, value))
         return value
     }
 
-    public func clippingOverlay(_ image: CGImage, options: ClippingOptions) throws -> CGImage? {
-        try OutputDiagnostics.clippingOverlay(image, options: options)
+    public nonisolated func clippingOverlay(_ image: CGImage, options: ClippingOptions) async throws -> CGImage? {
+        try await OutputDiagnostics.renderClippingOverlay(image, options: options)
     }
 
     /// Full-resolution processing precedes the viewport cut, preserving filter
@@ -328,16 +339,28 @@ public actor ImageEngine {
         let rect = try DetailPlan.renderRect(for: id, fullSize: fullSize)
         let background = CIImage(color: .black).cropped(to: graph.extent)
         var output = graph.composited(over: background)
-        if id.divisor > 1 { output = output.applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: 1 / Double(id.divisor), kCIInputAspectRatioKey: 1]) }
-        let bounds = CGRect(x: rect.minX, y: output.extent.maxY - rect.maxY, width: rect.width, height: rect.height)
+        let sampledSize = DetailPlan.sampledSize(for: fullSize, divisor: id.divisor)
+        let step = CGFloat(id.divisor)
+        if id.divisor > 1 {
+            // Anchor the grid at top-left: the partial bottom cell is padded
+            // below the image in Core Image's bottom-left coordinates.
+            let bottomPadding = sampledSize.height * step - fullSize.height
+            output = output.clampedToExtent()
+                .transformed(by: CGAffineTransform(translationX: 0, y: bottomPadding))
+                .applyingFilter("CILanczosScaleTransform", parameters: [kCIInputScaleKey: 1 / step, kCIInputAspectRatioKey: 1])
+                .cropped(to: CGRect(origin: .zero, size: sampledSize))
+        }
+        let bounds = CGRect(x: rect.minX, y: sampledSize.height - rect.maxY, width: rect.width, height: rect.height)
         try Task.checkCancellation()
         guard let image = context.createCGImage(output, from: bounds, format: .RGBA8, colorSpace: Self.outputSpace) else {
             throw EditorError.message("原始分辨率细节渲染失败。")
         }
         try Task.checkCancellation()
+        // Keep full sample spacing through the last cell; the canvas clips
+        // to fullSize without stretching the terminal row or column.
         let result = DetailTile(id: id, image: image,
-            sourceRect: CGRect(x: rect.minX * CGFloat(id.divisor), y: rect.minY * CGFloat(id.divisor),
-                               width: rect.width * CGFloat(id.divisor), height: rect.height * CGFloat(id.divisor)), fullSize: fullSize)
+            sourceRect: CGRect(x: rect.minX * step, y: rect.minY * step,
+                               width: rect.width * step, height: rect.height * step), fullSize: fullSize)
         let cost = image.bytesPerRow * image.height
         while detailCacheBytes + cost > detailCacheLimit, !detailTiles.isEmpty {
             let removed = detailTiles.removeFirst(); detailCacheBytes -= removed.image.bytesPerRow * removed.image.height

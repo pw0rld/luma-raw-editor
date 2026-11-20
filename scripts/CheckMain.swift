@@ -37,6 +37,7 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
             let details = DetailPreviewTests()
             try await details.testNativeTilesMatchExportAndPreserveFineDetail()
             try await details.testSampledTileEdgesAndRAWDetail()
+            try await details.testOddSampledGridKeepsTopLeftPhaseAndOpaqueEdges()
             print("PASS: \(assertionCount) detail assertions")
             return
         }
@@ -54,11 +55,12 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
         let stability = StabilityTests()
         try stability.testMaskAndCropRotationPreservesContent()
         stability.testLinearCoverageOpacityAndFeatherGeometry()
-        try stability.testV3RecipeAndV2Migration()
+        try stability.testCurrentRecipeAndV2Migration()
         try stability.testGlobalClusterAssignmentAndLegacyPreservation()
         try await stability.testAtomicDraftRoundTripAndCorruptRejection()
         let match = ColorMatchTests()
         try match.testLabConversionDeterministicAnalysisAndIdentity()
+        try match.testOutlierResistantAnalysisKeepsSparseAccent()
         try match.testIndependentStrengthsToneMonotonicityAndFlatProtection()
         try match.testMatchValidationRecipeMigrationAndHistory()
         if CommandLine.arguments.contains("--non-render") {
@@ -71,6 +73,9 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
         try await suite.testPipelineOrientationMetadataAndOriginalProtection()
         try await suite.testLocalMaskChangesOnlyMaskedRenderAndCanBeDisabled()
         try await suite.testRAWFixtureIfProvided()
+        let whiteBalance = WhiteBalanceTests()
+        try await whiteBalance.testRGBAndMaskDirectionsAndLegacyRecipe()
+        try await whiteBalance.testSyntheticRAWTemperatureAndTintDirections()
         let pixels = MaskPixelTests()
         try await pixels.testLocalCoverageAndLinearOpacity()
         try await pixels.testLinearRotationOverlayAndExport()
@@ -82,6 +87,7 @@ func XCTAssertThrowsError<T>(_ expression: @autoclosure () throws -> T, file: St
         let details = DetailPreviewTests()
         try await details.testNativeTilesMatchExportAndPreserveFineDetail()
         try await details.testSampledTileEdgesAndRAWDetail()
+        try await details.testOddSampledGridKeepsTopLeftPhaseAndOpaqueEdges()
         print("PASS: \(assertionCount) assertions; recipe/history/orientation/masks/color/metadata/export/source protection/reference matching")
     }
 }

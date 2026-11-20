@@ -36,6 +36,8 @@ private final class CheckWindow: NSWindow {
         precondition(view.consume(clippingKey()) == nil && clippingToggles == 1)
         precondition(view.consume(clippingKey(repeatKey: true)) == nil && clippingToggles == 1)
         precondition(view.consume(clippingKey(modifiers: .command)) != nil)
+        precondition(view.consume(clippingKey(modifiers: .shift)) != nil && clippingToggles == 1,
+                     "Shift+J must pass through without toggling clipping")
         precondition(view.hitTest(CGPoint(x: 10, y: 10)) == nil, "Navigation must not cover edit handles")
         let down = mouseEvent(.leftMouseDown)
         let consumedDown = view.consume(down)
@@ -49,7 +51,15 @@ private final class CheckWindow: NSWindow {
         precondition(view.consume(mouseEvent(.leftMouseUp, x: 1000, y: 900)) == nil)
         precondition(view.consume(mouseEvent(.leftMouseDragged)) != nil)
         precondition(view.consume(mouseEvent(.leftMouseDown, clicks: 2)) == nil && doubles == 1)
-        precondition(view.consume(mouseEvent(.leftMouseUp)) == nil)
+        precondition(view.consume(mouseEvent(.leftMouseDragged, x: 302, y: 299)) == nil)
+        precondition(view.consume(mouseEvent(.leftMouseDragged, x: 1000, y: 900)) == nil && pans.count == 1,
+                     "Dragging after the zoom click must not move the viewport")
+        precondition(view.consume(mouseEvent(.leftMouseUp, x: 1000, y: 900)) == nil,
+                     "The zoom click must consume its matching mouse-up outside the canvas")
+        precondition(view.consume(mouseEvent(.leftMouseDragged)) != nil)
+        precondition(view.consume(mouseEvent(.leftMouseDown, clicks: 2)) == nil && doubles == 2)
+        NotificationCenter.default.post(name: NSWindow.didResignKeyNotification, object: window)
+        precondition(view.consume(mouseEvent(.leftMouseDragged)) != nil, "Losing focus must clear zoom click suppression")
         view.dragToPan = false
         precondition(view.consume(mouseEvent(.leftMouseDown)) != nil, "Normal drags must reach the crop/mask handles")
         precondition(view.consume(space(.keyDown)) == nil)
