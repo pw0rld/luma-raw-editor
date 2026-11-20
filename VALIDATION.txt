@@ -185,3 +185,10 @@ Application deep/strict signature, arm64 architecture and ZIP integrity: PASS.
 Preview: LumaRAW-review-fixes-2026-11-20-macos-arm64.zip
 ZIP SHA-256: 184e1a93d6bfd8bff2bf123b5c0ba399fe41ae14894def4df7b5d8821054e762
 Remaining: real-camera RAW latency and peak memory measurements before choosing broader optimization. Metal migration is tracked separately.
+
+2026-11-20 — follow-up to cc2b624
+Complete scripts/build.sh --check with the bundled synthetic Bayer DNG: PASS (508 core assertions and all integration checks).
+An identical sample set presented in both scan orders retains the same 0.8% accent and produces equal clusters.
+V2 workspace migration preserves linear mask falloff in current, saved, undo and redo states, including after a save and reopen. V4 recipe and workspace inputs use current white balance for omitted flags.
+The native SwiftUI slider probe measured a constant 202 pt inspector height at both midpoint endpoints and after moving back to the center.
+The rotation check covers crop and mask overlays while an old-orientation preview awaits replacement. Reference integration separately verifies use of new bytes for a changed reference path and retention of the original editing session.

@@ -382,16 +382,15 @@ struct EditorView: View {
             HStack {
                 Text(title)
                 Spacer()
-                if fixed {
-                    Image(systemName: "lock.fill").foregroundStyle(.secondary).accessibilityLabel("当前固定")
-                }
+                Image(systemName: "lock.fill").foregroundStyle(.secondary).opacity(fixed ? 1 : 0)
+                    .accessibilityLabel("当前固定").accessibilityHidden(!fixed)
                 Text(String(format: format, model.settings[keyPath: key] * displayScale))
                     .monospacedDigit().foregroundStyle(.secondary)
             }.font(.caption)
-            if !fixed {
-                Slider(value: Binding(get: { model.settings[keyPath: key] }, set: { model.set(key, value: $0) }),
-                       in: range, onEditingChanged: model.gesture).tint(.orange)
-            }
+            let value = fixed ? Binding.constant(range.lowerBound)
+                : Binding(get: { model.settings[keyPath: key] }, set: { model.set(key, value: $0) })
+            Slider(value: value, in: fixed ? 0...1 : range, onEditingChanged: model.gesture)
+                .tint(.orange).disabled(fixed)
         }
     }
     private func maskSlider(_ title: String, key: WritableKeyPath<LocalMask, Double>, range: ClosedRange<Double>, format: String, displayScale: Double = 1) -> some View {
@@ -526,7 +525,7 @@ private struct NavigablePhotoCanvas: View {
                         .frame(width: geometry.imageRect.width, height: geometry.imageRect.height)
                         .position(x: geometry.imageRect.midX, y: geometry.imageRect.midY).allowsHitTesting(false)
                     detailLayer(geometry)
-                    if !model.compare, model.tool != .browse, model.previewIsFullFrame {
+                    if model.showsEditOverlays {
                         CropOverlayPane(transform: geometry, cropRect: model.cropRect,
                                         canEdit: model.tool == .crop && model.canEditCanvas,
                                         onChange: model.setCropRect, onEditingChanged: { model.gesture($0, owner: $1) })
@@ -541,7 +540,7 @@ private struct NavigablePhotoCanvas: View {
                 }
                 .frame(width: proxy.size.width, height: proxy.size.height, alignment: .topLeading).clipped()
                 .background(CanvasNavigation(enabled: !model.busy,
-                    dragToPan: model.compare || model.tool == .browse || !model.previewIsFullFrame,
+                    dragToPan: !model.showsEditOverlays,
                     onZoom: { factor, point in
                         viewport.zoom(by: factor, at: point, imageSize: imageSize, viewportSize: proxy.size, displayScale: displayScale)
                     }, onPan: { delta in
@@ -554,7 +553,7 @@ private struct NavigablePhotoCanvas: View {
                 .onChange(of: proxy.size) { canvasSize = $0 }
             }.padding(16)
             HStack {
-                Text(model.tool == .browse || model.compare ? "拖动平移 · 捏合缩放" : "空格拖动平移")
+                Text(model.showsEditOverlays ? "空格拖动平移" : "拖动平移 · 捏合缩放")
                 Spacer(minLength: 2)
                 Text(detailStatus).foregroundStyle(detailError == nil && planningError == nil ? Color.secondary : Color.orange)
             }.font(.caption2).foregroundStyle(.secondary).lineLimit(1).padding(.horizontal, 14).padding(.bottom, 10)

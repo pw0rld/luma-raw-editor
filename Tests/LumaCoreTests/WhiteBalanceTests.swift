@@ -65,8 +65,6 @@ final class WhiteBalanceTests: XCTestCase {
             let recipe = Recipe(sourceName: url.lastPathComponent, sourceSHA256: info.sha256, rawProfile: nil, adjustments: corrected)
             XCTAssertEqual(try Recipe.decode(recipe.encoded()).adjustments, corrected)
             var json = try JSONSerialization.jsonObject(with: recipe.encoded()) as! [String: Any]
-            json["version"] = 3
-            json["pipeline"] = "luma-sdr-p3-v3"
             var stored = json["adjustments"] as! [String: Any]
             stored.removeValue(forKey: "legacyWhiteBalance")
             if local {
@@ -75,6 +73,10 @@ final class WhiteBalanceTests: XCTestCase {
                 stored["localMasks"] = masks
             }
             json["adjustments"] = stored
+            let implicitCurrent = try Recipe.decode(JSONSerialization.data(withJSONObject: json))
+            XCTAssertEqual(implicitCurrent.adjustments, corrected)
+            json["version"] = 3
+            json["pipeline"] = "luma-sdr-p3-v3"
             let legacy = try Recipe.decode(JSONSerialization.data(withJSONObject: json))
             XCTAssertEqual(legacy.adjustments.legacyWhiteBalance, !local)
             XCTAssertEqual(legacy.adjustments.localMasks.first?.legacyWhiteBalance, local ? true : nil)

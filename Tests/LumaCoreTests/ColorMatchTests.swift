@@ -83,6 +83,18 @@ final class ColorMatchTests: XCTestCase {
         XCTAssertLessThan(abs(accentGroup.meanB + 44), 0.01)
         XCTAssertLessThan(abs(accentGroup.weight - 8.0 / 998.0), 0.0001)
         XCTAssertLessThan(abs(withAccent.clusters.map(\.weight).reduce(0, +) - 1), 0.000001)
+
+        // With one seed left, the first end of the accent's gradient is
+        // closer than the competing color, while its centroid is farther.
+        let neutral = Array(repeating: LabColor(lightness: 50, a: 0, b: 0), count: 890)
+        let competing = Array(repeating: LabColor(lightness: 50, a: -32, b: 0), count: 102)
+        let gradient = (0..<8).map { LabColor(lightness: 55, a: 20 + 4 * Double($0), b: 0) }
+        let forward = try MatchAnalysis.analyze(neutral + competing + gradient, clusterCount: 2)
+        let reversed = try MatchAnalysis.analyze(neutral + competing + Array(gradient.reversed()), clusterCount: 2)
+        XCTAssertEqual(forward, reversed)
+        XCTAssertEqual(forward.clusters.count, 2)
+        XCTAssertEqual(forward.clusters.last?.meanA, 34)
+        XCTAssertEqual(forward.clusters.last?.weight, 0.008)
     }
 
     func testIndependentStrengthsToneMonotonicityAndFlatProtection() throws {

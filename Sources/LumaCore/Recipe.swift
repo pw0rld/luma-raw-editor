@@ -1,5 +1,13 @@
 import Foundation
 
+private extension UnkeyedDecodingContainer {
+    mutating func decodeElements<Element>(_ decode: (Decoder) throws -> Element) throws -> [Element] {
+        var elements: [Element] = []
+        while !isAtEnd { elements.append(try decode(superDecoder())) }
+        return elements
+    }
+}
+
 public enum EditorError: LocalizedError {
     case message(String)
     public var errorDescription: String? { if case .message(let text) = self { return text }; return nil }
@@ -91,6 +99,9 @@ public struct LocalMask: Codable, Equatable, Identifiable {
         case legacyWhiteBalance
     }
     public init(from decoder: Decoder) throws {
+        try self.init(from: decoder, legacyWhiteBalanceByDefault: true)
+    }
+    fileprivate init(from decoder: Decoder, legacyWhiteBalanceByDefault: Bool) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         id = try c.decodeIfPresent(UUID.self, forKey: .id) ?? UUID()
         kind = try c.decodeIfPresent(LocalMaskKind.self, forKey: .kind) ?? .radial
@@ -109,7 +120,7 @@ public struct LocalMask: Codable, Equatable, Identifiable {
         enabled = try c.decodeIfPresent(Bool.self, forKey: .enabled) ?? true
         legacyLinearFalloff = try c.decodeIfPresent(Bool.self, forKey: .legacyLinearFalloff) ?? false
         legacyWhiteBalance = try c.decodeIfPresent(Bool.self, forKey: .legacyWhiteBalance)
-            ?? (temperatureDelta != 0 || tintDelta != 0)
+            ?? (legacyWhiteBalanceByDefault && (temperatureDelta != 0 || tintDelta != 0))
     }
 
     public func validate() throws {
@@ -174,12 +185,14 @@ public struct Adjustments: Codable, Equatable {
         case localMasks, legacyWhiteBalance
     }
     public init(from decoder: Decoder) throws {
+        try self.init(from: decoder, legacyWhiteBalanceByDefault: true)
+    }
+    init(from decoder: Decoder, legacyWhiteBalanceByDefault: Bool) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         temperature = try container.decodeIfPresent(Double.self, forKey: .temperature) ?? 6500
         tint = try container.decodeIfPresent(Double.self, forKey: .tint) ?? 0
-        // This also covers standalone adjustment values in draft undo/redo stacks.
         legacyWhiteBalance = try container.decodeIfPresent(Bool.self, forKey: .legacyWhiteBalance)
-            ?? (temperature != 6500 || tint != 0)
+            ?? (legacyWhiteBalanceByDefault && (temperature != 6500 || tint != 0))
         exposure = try container.decodeIfPresent(Double.self, forKey: .exposure) ?? 0
         saturation = try container.decodeIfPresent(Double.self, forKey: .saturation) ?? 1
         shadows = try container.decodeIfPresent(Double.self, forKey: .shadows) ?? 0.25
@@ -191,7 +204,12 @@ public struct Adjustments: Codable, Equatable {
         cropRect = try container.decodeIfPresent(CropRect.self, forKey: .cropRect)
             ?? CropRect(x: oldHorizontal, y: oldVertical,
                         width: 1 - 2 * oldHorizontal, height: 1 - 2 * oldVertical)
-        localMasks = try container.decodeIfPresent([LocalMask].self, forKey: .localMasks) ?? []
+        if container.contains(.localMasks), try !container.decodeNil(forKey: .localMasks) {
+            var masks = try container.nestedUnkeyedContainer(forKey: .localMasks)
+            localMasks = try masks.decodeElements {
+                try LocalMask(from: $0, legacyWhiteBalanceByDefault: legacyWhiteBalanceByDefault)
+            }
+        }
         colorMatch = try container.decodeIfPresent(ColorMatch.self, forKey: .colorMatch)
     }
     public func encode(to encoder: Encoder) throws {
@@ -223,6 +241,15 @@ public struct Adjustments: Codable, Equatable {
         for mask in localMasks { try mask.validate() }
         try colorMatch?.validate()
     }
+
+    mutating func updateLegacyFlags(linearFalloff: Bool, isRAW: Bool) {
+        if linearFalloff {
+            for index in localMasks.indices where localMasks[index].kind == .linear {
+                localMasks[index].legacyLinearFalloff = true
+            }
+        }
+        if isRAW { legacyWhiteBalance = false }
+    }
 }
 
 public struct RAWProfile: Codable, Equatable {
@@ -247,6 +274,26 @@ public struct Recipe: Codable, Equatable {
         self.sourceName = sourceName; self.sourceSHA256 = sourceSHA256
         self.rawProfile = rawProfile; self.adjustments = adjustments
     }
+    private enum CodingKeys: String, CodingKey {
+        case version, pipeline, sourceName, sourceSHA256, rawProfile, adjustments
+    }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        version = try container.decode(Int.self, forKey: .version)
+        pipeline = try container.decode(String.self, forKey: .pipeline)
+        sourceName = try container.decode(String.self, forKey: .sourceName)
+        sourceSHA256 = try container.decode(String.self, forKey: .sourceSHA256)
+        rawProfile = try container.decodeIfPresent(RAWProfile.self, forKey: .rawProfile)
+        adjustments = try Adjustments(from: container.superDecoder(forKey: .adjustments),
+                                      legacyWhiteBalanceByDefault: Self.hasLegacyWhiteBalanceDefault(version, pipeline))
+    }
+    // Only older recipe schemas infer legacy behavior from a missing flag.
+    private static func hasLegacyWhiteBalanceDefault(_ version: Int, _ pipeline: String) -> Bool {
+        (1...3).contains(version) && pipeline == "luma-sdr-p3-v\(version)"
+    }
+    var legacyWhiteBalanceByDefault: Bool { Self.hasLegacyWhiteBalanceDefault(version, pipeline) }
+    var usesLegacyLinearFalloff: Bool { version == 2 && legacyWhiteBalanceByDefault }
+
     public func encoded() throws -> Data {
         try validate()
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -258,19 +305,12 @@ public struct Recipe: Codable, Equatable {
         return value
     }
     mutating func migrateAndValidate() throws {
-        if version == 2, pipeline == "luma-sdr-p3-v2" {
-            for index in adjustments.localMasks.indices where adjustments.localMasks[index].kind == .linear {
-                adjustments.localMasks[index].legacyLinearFalloff = true
-            }
-        }
-        let supportedLegacy = (version == 1 && pipeline == "luma-sdr-p3-v1" && adjustments.colorMatch == nil)
-            || (version == 2 && pipeline == "luma-sdr-p3-v2")
-            || (version == 3 && pipeline == "luma-sdr-p3-v3")
+        adjustments.updateLegacyFlags(linearFalloff: usesLegacyLinearFalloff, isRAW: rawProfile != nil)
+        let supportedLegacy = legacyWhiteBalanceByDefault && (version != 1 || adjustments.colorMatch == nil)
         if supportedLegacy {
             version = Self.currentVersion
             pipeline = Self.currentPipeline
         }
-        if rawProfile != nil { adjustments.legacyWhiteBalance = false }
         try validate()
     }
     public func validate() throws {
@@ -301,9 +341,29 @@ public struct EditHistory: Codable {
     public private(set) var undoStack: [Adjustments] = []
     public private(set) var redoStack: [Adjustments] = []
     public init() {}
-    mutating func clearIgnoredRAWWhiteBalance() {
-        for index in undoStack.indices { undoStack[index].legacyWhiteBalance = false }
-        for index in redoStack.indices { redoStack[index].legacyWhiteBalance = false }
+    private enum CodingKeys: String, CodingKey {
+        case undoStack, redoStack
+    }
+    public init(from decoder: Decoder) throws {
+        try self.init(from: decoder, legacyWhiteBalanceByDefault: true)
+    }
+    init(from decoder: Decoder, legacyWhiteBalanceByDefault: Bool) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        var undo = try container.nestedUnkeyedContainer(forKey: .undoStack)
+        var redo = try container.nestedUnkeyedContainer(forKey: .redoStack)
+        func decodeAdjustment(_ decoder: Decoder) throws -> Adjustments {
+            try Adjustments(from: decoder, legacyWhiteBalanceByDefault: legacyWhiteBalanceByDefault)
+        }
+        undoStack = try undo.decodeElements(decodeAdjustment)
+        redoStack = try redo.decodeElements(decodeAdjustment)
+    }
+    mutating func updateLegacyFlags(linearFalloff: Bool, isRAW: Bool) {
+        for index in undoStack.indices {
+            undoStack[index].updateLegacyFlags(linearFalloff: linearFalloff, isRAW: isRAW)
+        }
+        for index in redoStack.indices {
+            redoStack[index].updateLegacyFlags(linearFalloff: linearFalloff, isRAW: isRAW)
+        }
     }
     public mutating func record(from: Adjustments, to: Adjustments) {
         guard from != to else { return }

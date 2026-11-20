@@ -110,7 +110,21 @@ final class StabilityTests: XCTestCase {
         var legacy = draft
         legacy.entries[0].recipe.version = 2
         legacy.entries[0].recipe.pipeline = "luma-sdr-p3-v2"
-        legacy.entries[0].recipe.adjustments.localMasks[0].kind = .linear
+        var linearEdit = settings
+        linearEdit.tint = 20
+        linearEdit.localMasks[0].kind = .linear
+        linearEdit.localMasks[0].temperatureDelta = 600
+        var earlier = linearEdit
+        earlier.exposure = -1
+        var later = linearEdit
+        later.exposure = 1
+        var linearHistory = EditHistory()
+        linearHistory.record(from: earlier, to: linearEdit)
+        linearHistory.record(from: linearEdit, to: later)
+        _ = linearHistory.undo(current: later)
+        legacy.entries[0].recipe.adjustments = linearEdit
+        legacy.entries[0].saved = earlier
+        legacy.entries[0].history = linearHistory
         let rawURL = directory.appendingPathComponent("source.dng")
         let rawProfile = RAWProfile(decoderVersion: "test", values: [
             "baselineExposure": 0, "shadowBias": 0, "boostAmount": 1, "boostShadowAmount": 0
@@ -134,20 +148,58 @@ final class StabilityTests: XCTestCase {
         legacy.entries.append(DraftEntry(sourceURL: rawURL, recipe: rawRecipe, saved: rawSettings,
             history: rawHistory, selectedMaskID: nil))
 
-        try JSONEncoder().encode(legacy).write(to: draftURL)
+        func omittingWhiteBalanceFlags(_ json: Any) -> Any {
+            if var dictionary = json as? [String: Any] {
+                dictionary.removeValue(forKey: "legacyWhiteBalance")
+                return dictionary.mapValues(omittingWhiteBalanceFlags)
+            }
+            if let array = json as? [Any] { return array.map(omittingWhiteBalanceFlags) }
+            return json
+        }
+        func writeWithoutFlags(_ workspace: WorkspaceDraft) throws {
+            let json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(workspace))
+            try JSONSerialization.data(withJSONObject: omittingWhiteBalanceFlags(json)).write(to: draftURL)
+        }
+        try writeWithoutFlags(legacy)
         let migrated = try await store.load()
-        XCTAssertEqual(migrated?.entries[0].recipe.version, Recipe.currentVersion)
-        XCTAssertEqual(migrated?.entries[0].recipe.adjustments.localMasks[0].legacyLinearFalloff, true)
-        XCTAssertEqual(migrated?.entries[0].history.undoStack, history.undoStack)
-        guard let raw = migrated?.entries.first(where: { $0.sourceURL == rawURL }) else {
-            XCTFail("Missing migrated RAW draft")
+        guard let migrated,
+              let rgb = migrated.entries.first(where: { $0.sourceURL == sourceURL }),
+              let raw = migrated.entries.first(where: { $0.sourceURL == rawURL }) else {
+            XCTFail("Missing migrated drafts")
             return
+        }
+        XCTAssertEqual(rgb.recipe.version, Recipe.currentVersion)
+        XCTAssertEqual(rgb.saved.exposure, -1)
+        XCTAssertEqual(rgb.history.undoStack.first?.exposure, -1)
+        XCTAssertEqual(rgb.history.redoStack.first?.exposure, 1)
+        let oldStates = [rgb.recipe.adjustments, rgb.saved] + rgb.history.undoStack + rgb.history.redoStack
+        for state in oldStates {
+            XCTAssertTrue(state.localMasks[0].legacyLinearFalloff)
+            XCTAssertTrue(state.localMasks[0].legacyWhiteBalance)
+            XCTAssertTrue(state.legacyWhiteBalance)
         }
         rawSettings.legacyWhiteBalance = false
         XCTAssertEqual(raw.recipe.adjustments, rawSettings)
         XCTAssertEqual(raw.saved, rawSettings)
         XCTAssertEqual(raw.history.undoStack, [rawSettings])
         XCTAssertEqual(raw.history.redoStack, [rawSettings])
+
+        // A second startup after saving the migrated workspace retains the flags explicitly.
+        try await store.save(migrated)
+        let reopened = try await store.load()
+        XCTAssertEqual(reopened?.entries[0].recipe.adjustments, rgb.recipe.adjustments)
+        XCTAssertEqual(reopened?.entries[0].saved, rgb.saved)
+        XCTAssertEqual(reopened?.entries[0].history.undoStack, rgb.history.undoStack)
+        XCTAssertEqual(reopened?.entries[0].history.redoStack, rgb.history.redoStack)
+
+        legacy.entries[0].recipe.version = Recipe.currentVersion
+        legacy.entries[0].recipe.pipeline = Recipe.currentPipeline
+        try writeWithoutFlags(legacy)
+        let current = try await store.load()?.entries[0]
+        XCTAssertEqual(current?.recipe.adjustments, linearEdit)
+        XCTAssertEqual(current?.saved, earlier)
+        XCTAssertEqual(current?.history.undoStack, [earlier])
+        XCTAssertEqual(current?.history.redoStack, [later])
 
         try Data("corrupt".utf8).write(to: draftURL)
         do { _ = try await store.load(); XCTFail("Corrupt draft accepted") } catch { }

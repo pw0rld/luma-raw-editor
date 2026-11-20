@@ -64,6 +64,9 @@ public struct MatchAnalysis: Equatable {
         func distance(_ p: LabColor, _ q: LabColor) -> Double {
             let a = p.a - q.a, b = p.b - q.b; return a * a + b * b
         }
+        func precedesInChroma(_ lhs: LabColor, _ rhs: LabColor) -> Bool {
+            lhs.a == rhs.a ? lhs.b < rhs.b : lhs.a < rhs.a
+        }
         // Count neighboring chroma bins together so a small accent can span
         // several shades while distant defects cannot claim an initial center.
         // A group needs at least two samples and 0.5% of the valid pixels.
@@ -93,15 +96,23 @@ public struct MatchAnalysis: Equatable {
             }
         }
         var supported: [LabColor] = [], supportedSeeds: [LabColor] = []
-        var seededSmallComponents = Set<ChromaCell>()
+        var smallComponents: [ChromaCell: [LabColor]] = [:]
         for (point, cell) in zip(validSamples, cells) {
             guard let component = supportedCells[cell] else { continue }
             supported.append(point)
-            // A color region too small for two valid groups gets one seed
-            // candidate, even when its shades span a wide chroma range.
-            if component.population >= 2 * minimumPopulation || seededSmallComponents.insert(component.anchor).inserted {
+            if component.population >= 2 * minimumPopulation {
                 supportedSeeds.append(point)
+            } else {
+                smallComponents[component.anchor, default: []].append(point)
             }
+        }
+        // Give small accents one centroid candidate. Sum in chroma order so
+        // permuting the same samples does not change the accent's candidate.
+        for component in smallComponents.values {
+            let ordered = component.sorted(by: precedesInChroma)
+            supportedSeeds.append(LabColor(lightness: 0,
+                a: ordered.reduce(0) { $0 + $1.a } / Double(ordered.count),
+                b: ordered.reduce(0) { $0 + $1.b } / Double(ordered.count)))
         }
         // Trim isolated chroma only when nearly all samples have support.
         // Broad or diffuse palettes keep their wider chroma distribution.
@@ -113,10 +124,16 @@ public struct MatchAnalysis: Equatable {
         let mean = LabColor(lightness: 0,
                             a: seedPopulation.reduce(0) { $0 + $1.a } / Double(seedPopulation.count),
                             b: seedPopulation.reduce(0) { $0 + $1.b } / Double(seedPopulation.count))
-        var centers = [seeds.min(by: { distance($0, mean) < distance($1, mean) })!]
+        let first = seeds.min { lhs, rhs in
+            let leftDistance = distance(lhs, mean), rightDistance = distance(rhs, mean)
+            return leftDistance == rightDistance ? precedesInChroma(lhs, rhs) : leftDistance < rightDistance
+        }!
+        var centers = [first]
         var nearest = seeds.map { distance($0, centers[0]) }
         while centers.count < clusterCount {
-            let index = nearest.indices.max(by: { nearest[$0] < nearest[$1] })!
+            let index = nearest.indices.min {
+                nearest[$0] == nearest[$1] ? precedesInChroma(seeds[$0], seeds[$1]) : nearest[$0] > nearest[$1]
+            }!
             guard nearest[index] > 0.04 else { break }
             let seed = seeds[index]
             centers.append(seed)

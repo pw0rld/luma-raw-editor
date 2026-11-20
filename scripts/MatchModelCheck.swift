@@ -86,6 +86,32 @@ import LumaCore
         await model.applyColorMatch().value
         precondition(model.settings.colorMatch == firstMatch && model.error == nil,
                      "Failed replacement must not corrupt the previous reference engine")
-        print("PASS: reference import, one-click match, non-compounding repeat, strengths, dirty state, undo/redo, clear/undo, folder sessions and failed-reference preservation")
+
+        let originalBytes = try Data(contentsOf: first)
+        let editedFirst = model.settings
+        let firstHistory = model.history
+        await model.open(second).value
+        let editedSecond = model.settings
+        let documentURLs = model.photos
+        try Data(contentsOf: referenceFixture).write(to: first, options: .atomic)
+        await model.openReference(first).value
+        precondition(model.error == nil && model.referenceName == first.lastPathComponent &&
+                     model.photo?.url == second && model.settings == editedSecond && model.photos == documentURLs,
+                     "A changed file must remain usable as a read-only reference")
+        await model.applyColorMatch().value
+        precondition(model.settings.colorMatch?.referenceName == first.lastPathComponent &&
+                     model.settings.colorMatch?.referenceSHA256 == firstMatch.referenceSHA256,
+                     "Matching should use the newly loaded file bytes")
+        let matchedSecond = model.settings
+        await model.open(first).value
+        precondition(model.error != nil && model.photo?.url == second && model.settings == matchedSecond,
+                     "Opening the changed file for editing must still protect its existing session")
+        model.error = nil
+        try originalBytes.write(to: first, options: .atomic)
+        await model.open(first).value
+        precondition(model.error == nil && model.photo?.url == first && model.settings == editedFirst &&
+                     model.history.undoStack == firstHistory.undoStack && model.history.redoStack == firstHistory.redoStack,
+                     "Using a changed file as reference must preserve its earlier edits and history")
+        print("PASS: reference import and matching, per-photo history, failed reference preservation, and read-only use of changed files")
     }
 }

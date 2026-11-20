@@ -10,6 +10,21 @@ public struct DraftEntry: Codable {
         self.sourceURL = sourceURL; self.recipe = recipe; self.saved = saved
         self.history = history; self.selectedMaskID = selectedMaskID
     }
+    private enum CodingKeys: String, CodingKey {
+        case sourceURL, recipe, saved, history, selectedMaskID
+    }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        sourceURL = try container.decode(URL.self, forKey: .sourceURL)
+        let storedRecipe = try container.decode(Recipe.self, forKey: .recipe)
+        recipe = storedRecipe
+        let legacyWhiteBalanceByDefault = storedRecipe.legacyWhiteBalanceByDefault
+        saved = try Adjustments(from: container.superDecoder(forKey: .saved),
+                                legacyWhiteBalanceByDefault: legacyWhiteBalanceByDefault)
+        history = try EditHistory(from: container.superDecoder(forKey: .history),
+                                  legacyWhiteBalanceByDefault: legacyWhiteBalanceByDefault)
+        selectedMaskID = try container.decodeIfPresent(UUID.self, forKey: .selectedMaskID)
+    }
 }
 
 public struct WorkspaceDraft: Codable {
@@ -29,12 +44,14 @@ public struct WorkspaceDraft: Codable {
             throw EditorError.message("自动草稿格式无效。")
         }
         for index in entries.indices {
+            let linearFalloff = entries[index].recipe.usesLegacyLinearFalloff
+            let isRAW = entries[index].recipe.rawProfile != nil
             try entries[index].recipe.migrateAndValidate()
             guard entries[index].history.undoStack.count <= 100,
                   entries[index].history.redoStack.count <= 100 else { throw EditorError.message("草稿历史过长。") }
-            if entries[index].recipe.rawProfile != nil {
-                entries[index].saved.legacyWhiteBalance = false
-                entries[index].history.clearIgnoredRAWWhiteBalance()
+            if linearFalloff || isRAW {
+                entries[index].saved.updateLegacyFlags(linearFalloff: linearFalloff, isRAW: isRAW)
+                entries[index].history.updateLegacyFlags(linearFalloff: linearFalloff, isRAW: isRAW)
             }
             try entries[index].saved.validate()
             for state in entries[index].history.undoStack { try state.validate() }

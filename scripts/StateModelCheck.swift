@@ -80,9 +80,23 @@ import LumaCore
             precondition(restored.error == nil && restored.preview != nil)
             precondition(restored.settings == model.settings && restored.selectedMaskID == model.selectedMaskID)
             precondition(restored.canUndo && restored.dirty)
-            restored.tool = .crop
-            await restored.waitForPreview()
-            precondition(restored.previewIsFullFrame)
+            for tool in [EditorTool.crop, .mask] {
+                restored.tool = tool
+                await restored.waitForPreview()
+                precondition(restored.showsEditOverlays && restored.canEditCanvas)
+                let before = restored.settings
+                restored.rotate()
+                precondition(restored.previewIsFullFrame && restored.previewQuarterTurns == before.quarterTurns)
+                precondition(!restored.showsEditOverlays && !restored.canEditCanvas,
+                             "Rotated overlay geometry must wait for its matching preview")
+                await restored.waitForPreview()
+                precondition(restored.previewQuarterTurns == restored.settings.quarterTurns
+                             && restored.showsEditOverlays && restored.canEditCanvas)
+                restored.undo()
+                await restored.waitForPreview()
+                precondition(restored.settings == before)
+            }
+            print("PASS: crop and mask overlays hide during rotation and return with matching preview geometry")
             restored.tool = .browse
             await restored.waitForPreview()
             precondition(!restored.previewIsFullFrame)

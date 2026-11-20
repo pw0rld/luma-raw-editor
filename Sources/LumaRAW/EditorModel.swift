@@ -80,7 +80,10 @@ struct CanvasRenderState: Equatable {
         self.engine = engine; draftStore = draftURL.map { DraftStore(url: $0) }
     }
     var canAddMask: Bool { photo != nil && !busy && masks.count < LocalMask.maximumCount }
-    var canEditCanvas: Bool { !busy && previewIsFullFrame && previewQuarterTurns == settings.quarterTurns }
+    var showsEditOverlays: Bool {
+        !compare && tool != .browse && previewIsFullFrame && previewQuarterTurns == settings.quarterTurns
+    }
+    var canEditCanvas: Bool { !busy && showsEditOverlays }
     var dirty: Bool { photo != nil && settings != savedSettings }
     var canUndo: Bool { !history.undoStack.isEmpty }
     var canRedo: Bool { !history.redoStack.isEmpty }
@@ -273,9 +276,6 @@ struct CanvasRenderState: Equatable {
             do {
                 let candidate = ImageEngine()
                 let result = try await candidate.open(url)
-                if let session = sessions[url], session.sha256 != result.sha256 || session.profile != result.profile {
-                    throw EditorError.message("原片或 RAW 解码配置已改变，旧草稿已保留。请使用原片的正确版本，或另存副本作为新照片导入。")
-                }
                 let image = try await candidate.preview(result.initial, profile: result.profile)
                 referenceEngine = candidate; referencePhoto = result
                 referenceURLs.insert(url); referenceName = url.lastPathComponent; referencePreview = image
